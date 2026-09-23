@@ -1,0 +1,4 @@
+interface:
+  display_name: "PDF Skill for Obsidian"
+  short_description: "Polish Obsidian Markdown PDF pagination"
+  default_prompt: "Use $pdf-skill-for-obsidian to format this Obsidian Markdown note for a clean PDF export."

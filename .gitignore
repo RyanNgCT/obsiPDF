@@ -1,0 +1,16 @@
+# Obsidian workspace state
+.obsidian/
+.trash/
+
+# Generated comparisons and scratch files
+tmp/
+output/
+*.pdf
+
+# Python caches
+__pycache__/
+*.py[cod]
+
+# OS metadata
+.DS_Store
+Thumbs.db
