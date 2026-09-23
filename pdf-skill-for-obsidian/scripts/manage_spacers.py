@@ -189,7 +189,9 @@ def command_insert(args: argparse.Namespace) -> int:
         raise ValueError(f"Managed spacer id already exists: {args.id}")
     anchor = resolve_anchor(source.lines, args.before_line, args.before_text)
     target = source.lines[anchor] if anchor < len(source.lines) else ""
-    if args.quote_prefix is not None:
+    if args.outside_blockquote:
+        prefix = ""
+    elif args.quote_prefix is not None:
         prefix = args.quote_prefix
     else:
         match = QUOTE_RE.match(target)
@@ -256,8 +258,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--lines", type=int, required=True, choices=range(1, 101), metavar="1..100"
     )
     insert_parser.add_argument("--id", type=safe_id, required=True)
-    insert_parser.add_argument(
+    quote_handling = insert_parser.add_mutually_exclusive_group()
+    quote_handling.add_argument(
         "--quote-prefix", help="override the blockquote prefix inherited from the target line"
+    )
+    quote_handling.add_argument(
+        "--outside-blockquote",
+        action="store_true",
+        help="insert an unquoted spacer before a blockquoted target such as a callout header",
     )
     insert_parser.set_defaults(handler=command_insert)
     return parser

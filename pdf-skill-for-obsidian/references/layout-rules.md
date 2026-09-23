@@ -22,11 +22,13 @@ For an H1-H6 heading, the first substantive block is the next rendered paragraph
 
 A heading is orphaned when its rendered text is on page `p` and that first substantive block begins on a later page. Insert spacing before the earliest heading in the group, not between grouped headings.
 
-## Callout list items
+## Complete callouts
 
-An Obsidian callout begins with a blockquoted marker such as `> [!note]`; its contents remain blockquoted and can contain Markdown lists. Track each logical list item from its bullet or number through all indented continuation lines, nested content, and code blocks belonging to that item.
+An Obsidian callout begins with a blockquoted marker such as `> [!note]`. Treat the entire callout as one protected block: its header and all blockquoted body lines, including paragraphs, lists and their continuation lines, headings, code, tables, mathematics, images, embeds, and nested callouts. The block ends where that callout's blockquote ends.
 
-The item violates the rule when its first and last rendered fragments occur on different pages. Insert the spacer directly before the item's bullet at the same blockquote depth. Do not require the whole callout to fit on one page, and do not alter the list text or indentation.
+The callout violates the rule when its header and final rendered content occur on different pages. Insert the spacer immediately before the callout header and outside the blockquote using `--outside-blockquote`. This preserves `> [!type]` as the first line of the callout. Do not insert spacing between the callout header and body, and do not alter any callout text or indentation.
+
+If a callout is taller than one printable page at the recorded export settings, keeping it intact is impossible. Report that callout as an explicit exception instead of repeatedly adding whitespace. Do not silently fall back to protecting only its list items or paragraphs.
 
 ## Finding violations in a PDF
 
@@ -51,7 +53,7 @@ The run is complete only when:
 
 1. A fresh export made with the recorded settings was inspected page by page.
 2. No H1-H6 heading is orphaned.
-3. No callout list item is split across pages, except an item proven taller than one printable page and reported to the user.
+3. No complete callout is split across pages, except a callout proven taller than one printable page and reported to the user.
 4. No accidental blank page, clipping, malformed callout, or excessive generated whitespace is visible.
 5. The source diff changes only managed spacer blocks.
 

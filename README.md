@@ -4,7 +4,7 @@ A reusable Codex skill for polishing the pagination of Obsidian-flavoured Markdo
 
 The skill dynamically adds managed LaTeX whitespace so that:
 - H1-H6 headings stay on the same page as the content they introduce.
-- List items inside [Obsidian callouts](https://obsidian.md/help/callouts) are not split across pages.
+- Complete [Obsidian callouts](https://obsidian.md/help/callouts)—including their headers and all paragraph, list, and other body content—stay on one page whenever the callout fits within a printable page.
 - Previous generated spacing can be removed and recalculated after the note changes.
 
 It validates layout against an actual Obsidian PDF export instead of estimating pagination from Markdown alone.
