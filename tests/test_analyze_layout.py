@@ -89,6 +89,52 @@ class MediaParsingTests(unittest.TestCase):
             analyze_layout.markdown_image_target("> ![[chart.png|450]]"), "chart.png"
         )
 
+    def test_media_led_block_includes_accompanying_spaced_list(self) -> None:
+        lines = (
+            "#### Example\n![diagram](diagram.png)\n1. First step\n\n"
+            "2. Second step\n  - detail\n\n> [!success] Next block"
+        ).splitlines()
+        self.assertEqual(analyze_layout.media_led_block(lines, 1), (1, 6))
+
+    def test_media_led_block_without_list_contains_image_only(self) -> None:
+        lines = "#### Diagram\n![diagram](diagram.png)\n\nNext paragraph".splitlines()
+        self.assertEqual(analyze_layout.media_led_block(lines, 1), (1, 2))
+
+
+class CalloutAnchorTests(unittest.TestCase):
+    def test_short_header_is_resolved_before_body_on_next_page(self) -> None:
+        pages = [
+            analyze_layout.PageData(["bottom", "up", "design"], [790.0] * 3, 842.0, 790.0),
+            analyze_layout.PageData(["bottom", "up", "design", "involves"], [50.0] * 4, 842.0, 50.0),
+        ]
+        boundary = analyze_layout.Location(2, 50.0, 842.0)
+        found = analyze_layout.resolve_short_anchor(pages, ["bottom", "up", "design"], boundary)
+        self.assertEqual((found[0].page, found[0].top), (1, 790.0))
+
+
+class OvercompensationTests(unittest.TestCase):
+    def test_first_heading_far_below_normal_top_is_rejected(self) -> None:
+        pages = [
+            analyze_layout.PageData(["normal"], [55.0], 842.0, 55.0),
+            analyze_layout.PageData(["dimension"], [230.0], 842.0, 230.0),
+        ]
+        self.assertTrue(
+            analyze_layout.page_top_overcompensated(
+                analyze_layout.Location(2, 230.0, 842.0), pages
+            )
+        )
+
+    def test_target_at_normal_top_is_accepted(self) -> None:
+        pages = [
+            analyze_layout.PageData(["normal"], [55.0], 842.0, 55.0),
+            analyze_layout.PageData(["heading"], [72.0], 842.0, 72.0),
+        ]
+        self.assertFalse(
+            analyze_layout.page_top_overcompensated(
+                analyze_layout.Location(2, 72.0, 842.0), pages
+            )
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

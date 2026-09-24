@@ -52,6 +52,7 @@ class PageData:
     tokens: list[str]
     tops: list[float]
     height: float
+    firstTop: float | None = None
 
 
 @dataclass
@@ -158,6 +159,26 @@ def nearest_location_before(
     return max(earlier, key=position) if earlier else None
 
 
+def resolve_short_anchor(
+    pages: list[PageData], anchor_tokens: list[str], boundary: Location | None
+) -> list[Location]:
+    """Locate a short/repeated anchor using the nearest following boundary.
+
+    Callout titles are often only one or two words.  Concatenating their body
+    text makes an impossible anchor when the header and body straddle a page.
+    Keep the header anchor intact and disambiguate repeated occurrences by
+    choosing the closest one before the block's end or next source anchor.
+    """
+    candidates = anchor_windows(anchor_tokens, False)
+    unique = locate(pages, candidates)
+    if unique:
+        return unique
+    if boundary is None:
+        return []
+    nearest = nearest_location_before(locate_all(pages, candidates), boundary)
+    return [nearest] if nearest else []
+
+
 def collect_callouts(lines: list[str]) -> list[Callout]:
     callouts: list[Callout] = []
     index = 0
@@ -246,6 +267,43 @@ def markdown_image_target(line: str) -> str | None:
     return (match.group(1) or match.group(2)).split("#", 1)[0].split("?", 1)[0]
 
 
+def media_led_block(lines: list[str], start: int) -> tuple[int, int] | None:
+    """Return a media-first block and any immediately accompanying list.
+
+    The returned pair is ``(media line, end-exclusive line)``. Blank lines are
+    allowed between list items, as in Obsidian notes, but a heading, callout,
+    paragraph, table, code block, or second media item ends the governed block.
+    """
+    media_index = skip_layout_only(lines, start)
+    if media_index >= len(lines) or markdown_image_target(lines[media_index]) is None:
+        return None
+    index = media_index + 1
+    while index < len(lines) and not lines[index].strip():
+        index += 1
+    if index >= len(lines) or not re.match(r"^\s{0,3}(?:[-+*]|\d+[.)])\s+", lines[index]):
+        return media_index, media_index + 1
+    end = index + 1
+    while end < len(lines):
+        stripped = lines[end].strip()
+        if not stripped:
+            probe = end + 1
+            while probe < len(lines) and not lines[probe].strip():
+                probe += 1
+            if probe < len(lines) and re.match(r"^\s{0,3}\d+[.)]\s+", lines[probe]):
+                end = probe + 1
+                continue
+            break
+        if HEADING_RE.match(lines[end]) or CALLOUT_RE.match(lines[end]):
+            break
+        if markdown_image_target(lines[end]) is not None or stripped.startswith(("|", "```", "~~~", "$$")):
+            break
+        if re.match(r"^\s+(?:[-+*]|\d+[.)])\s+", lines[end]):
+            end += 1
+            continue
+        break
+    return media_index, end
+
+
 def heading_is_too_low(level: int, fraction: float) -> bool:
     return level in LOW_HEADING_LEVELS and fraction >= LOW_HEADING_FRACTION
 
@@ -262,6 +320,18 @@ def next_anchor_tokens(lines: list[str], start: int) -> list[str] | None:
 
 def position(location: Location) -> tuple[int, float]:
     return location.page, location.top
+
+
+def page_top_overcompensated(location: Location, pages: list[PageData]) -> bool:
+    """Detect a moved target stranded materially below the normal top margin."""
+    page = pages[location.page - 1]
+    observed = [item.firstTop for item in pages if item.firstTop is not None]
+    if page.firstTop is None or not observed:
+        return False
+    normal_top = min(observed)
+    one_rendered_line = 24.0
+    is_first_visible_item = abs(location.top - page.firstTop) <= 2.0
+    return is_first_visible_item and location.top > normal_top + one_rendered_line
 
 
 def first_substantive_tokens(lines: list[str], start: int) -> tuple[int, list[str]] | None:
@@ -301,7 +371,14 @@ def analyze(note: Path, pdf: Path) -> dict[str, object]:
                 word_tokens = tokens(word["text"])
                 page_tokens.extend(word_tokens)
                 page_tops.extend([float(word["top"])] * len(word_tokens))
-            pages.append(PageData(page_tokens, page_tops, float(page.height)))
+            pages.append(
+                PageData(
+                    page_tokens,
+                    page_tops,
+                    float(page.height),
+                    min(page_tops) if page_tops else None,
+                )
+            )
             for image in sorted(page.images, key=lambda item: float(item.get("top", 0.0))):
                 pdf_image_locations.append(
                     Location(page_index + 1, float(image.get("top", 0.0)), float(page.height))
@@ -322,11 +399,16 @@ def analyze(note: Path, pdf: Path) -> dict[str, object]:
             )
             continue
         start_tokens = token_lines[0]
-        if len(start_tokens) < 3 and len(token_lines) > 1:
-            start_tokens = start_tokens + token_lines[1]
         end_tokens = token_lines[-1]
-        start_locations = locate(pages, anchor_windows(start_tokens, False))
         end_locations = locate(pages, anchor_windows(end_tokens, True))
+        boundary_tokens = next_anchor_tokens(lines, callout.end)
+        boundary_locations = (
+            locate(pages, anchor_windows(boundary_tokens, False)) if boundary_tokens else []
+        )
+        disambiguation_boundary = (
+            end_locations[0] if end_locations else (boundary_locations[0] if boundary_locations else None)
+        )
+        start_locations = resolve_short_anchor(pages, start_tokens, disambiguation_boundary)
         media_targets = [
             target
             for target in (
@@ -345,12 +427,6 @@ def analyze(note: Path, pdf: Path) -> dict[str, object]:
         if media_targets and len(raster_targets) != len(media_targets):
             missing.append("non-raster media")
         if raster_targets and start_locations:
-            boundary_tokens = next_anchor_tokens(lines, callout.end)
-            boundary_locations = (
-                locate(pages, anchor_windows(boundary_tokens, False))
-                if boundary_tokens
-                else []
-            )
             if boundary_locations:
                 media_locations = [
                     location
@@ -382,6 +458,20 @@ def analyze(note: Path, pdf: Path) -> dict[str, object]:
                     end_location.page,
                 )
             )
+        if page_top_overcompensated(start_locations[0], pages):
+            violations.append(
+                Violation(
+                    "page-top-overcompensation",
+                    callout.start + 1,
+                    callout.end,
+                    callout.label,
+                    start_locations[0].page,
+                    start_locations[0].page,
+                    round(start_locations[0].top, 2),
+                    round(start_locations[0].pageHeight, 2),
+                    round(start_locations[0].top / start_locations[0].pageHeight, 4),
+                )
+            )
 
     for index, line in enumerate(lines):
         match = HEADING_RE.match(line)
@@ -390,6 +480,7 @@ def analyze(note: Path, pdf: Path) -> dict[str, object]:
         level = len(match.group(1))
         label = visible_text(match.group(2)).strip()
         heading_tokens = tokens(label)
+        media_block = media_led_block(lines, index + 1)
         following = first_substantive_tokens(lines, index + 1)
         if not heading_tokens or not following:
             continue
@@ -406,7 +497,7 @@ def analyze(note: Path, pdf: Path) -> dict[str, object]:
         missing: list[str] = []
         if not heading_locations:
             missing.append("heading")
-        if not content_locations:
+        if not content_locations and media_block is None:
             missing.append("following content")
         governed_callout = heading_associated_callout(lines, index, callouts_by_start)
         governed_end = (
@@ -418,7 +509,11 @@ def analyze(note: Path, pdf: Path) -> dict[str, object]:
             unresolved.append(
                 Unresolved("heading", index + 1, end_index + 1, label, ", ".join(missing))
             )
-        elif governed_end is None and heading_locations[0].page != content_locations[0].page:
+        elif (
+            governed_end is None
+            and content_locations
+            and heading_locations[0].page != content_locations[0].page
+        ):
             violations.append(
                 Violation(
                     "heading",
@@ -447,6 +542,20 @@ def analyze(note: Path, pdf: Path) -> dict[str, object]:
                         round(fraction, 4),
                     )
                 )
+            if page_top_overcompensated(location, pages):
+                violations.append(
+                    Violation(
+                        "page-top-overcompensation",
+                        index + 1,
+                        index + 1,
+                        label,
+                        location.page,
+                        location.page,
+                        round(location.top, 2),
+                        round(location.pageHeight, 2),
+                        round(fraction, 4),
+                    )
+                )
 
         if (
             governed_callout is not None
@@ -464,6 +573,42 @@ def analyze(note: Path, pdf: Path) -> dict[str, object]:
                     governed_end.page,
                 )
             )
+
+        if media_block is not None and heading_locations:
+            media_index, block_end = media_block
+            block_token_lines = [line_tokens(lines[item]) for item in range(media_index + 1, block_end)]
+            block_token_lines = [item for item in block_token_lines if item]
+            block_end_locations = (
+                locate(pages, anchor_windows(block_token_lines[-1], True))
+                if block_token_lines
+                else []
+            )
+            next_tokens = next_anchor_tokens(lines, block_end)
+            next_locations = locate(pages, anchor_windows(next_tokens, False)) if next_tokens else []
+            upper = heading_locations[0]
+            lower = block_end_locations[0] if block_end_locations else (next_locations[0] if next_locations else None)
+            mapped_media = [
+                item
+                for item in pdf_image_locations
+                if position(upper) < position(item) and (lower is None or position(item) < position(lower))
+            ]
+            if not mapped_media:
+                unresolved.append(
+                    Unresolved("heading-media-group", index + 1, block_end, label, "raster image mapping")
+                )
+            else:
+                governed_media_end = max(mapped_media + block_end_locations, key=position)
+                if upper.page != governed_media_end.page:
+                    violations.append(
+                        Violation(
+                            "heading-media-group",
+                            index + 1,
+                            block_end,
+                            label,
+                            upper.page,
+                            governed_media_end.page,
+                        )
+                    )
 
     violations.sort(key=lambda item: (item.line, item.kind))
     unresolved.sort(key=lambda item: (item.line, item.kind))
