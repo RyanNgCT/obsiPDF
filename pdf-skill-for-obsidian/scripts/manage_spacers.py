@@ -179,8 +179,7 @@ def remove_blocks(lines: list[str], include_legacy: bool) -> tuple[list[str], in
             index, _ = legacy
             legacy_count += 1
             continue
-        if lines[index].strip():
-            output.append(lines[index])
+        output.append(lines[index])
         index += 1
 
     return output, managed_count, legacy_count
@@ -301,16 +300,13 @@ def command_insert(args: argparse.Namespace) -> int:
         match = QUOTE_RE.match(target)
         prefix = match.group(1) if match else ""
 
-    blank = quote_blank(prefix)
     body = r"\\" * args.lines
     latex = [
-        blank,
         f"{prefix}$$",
         f"{prefix}\\begin{{align}}",
         f"{prefix}{body}",
         f"{prefix}\\end{{align}}",
         f"{prefix}$$",
-        blank,
     ]
     block = latex if args.no_markers else [
         f'{prefix}%% {START_TOKEN} id="{args.id}" lines="{args.lines}" %%',
