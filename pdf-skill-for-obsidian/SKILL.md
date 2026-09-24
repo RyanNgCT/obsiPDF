@@ -18,13 +18,14 @@ Read [references/layout-rules.md](references/layout-rules.md) before editing pag
 3. Inventory spacers with `manage_spacers.py list`. Remove prior generated spacers before the clean baseline; when the user's legacy convention is in scope, use `clean --include-legacy`. Never change a non-whitespace `align` block or any pre-existing `<br>`.
 4. Export a clean baseline from Obsidian. If no PDF exists, create one. Always open **Export to PDF** from the note's three-dot **More options** menu, never the command palette or a generic renderer. Use temporary PDFs until final verification.
 5. Analyze all pages programmatically and visually. Fix the earliest confirmed violation unless corrections are proven independent:
-   - Every H1-H6 heading must share a page with its first substantive content. Keep consecutive heading groups together by spacing before the earliest heading.
+   - Every H1-H6 heading must share a page with the complete block it introduces. If the first block is a callout, or one short introductory paragraph leads directly to a callout, keep the heading, introduction, and complete callout together by spacing before the heading. Keep consecutive heading groups together by spacing before the earliest heading.
    - Move any H2-H5 whose top enters the bottom 15% of the physical page. This completion threshold subsumes the bottommost-tenth rule.
-   - Keep each feasible callout, from header through final nested content, on one page. Put its spacer immediately before and outside the blockquote.
+   - Keep each feasible callout, from header through final nested text and media, on one page. For a heading-associated callout, anchor the spacer before the heading so the whole governed group moves together. Otherwise, put the spacer immediately before and outside the blockquote.
+   - Treat every analyzer `unresolved` item as requiring visual adjudication. An empty `violations` array is not a pass while unresolved items have not been checked; the analyzer exits with code 2 for this state.
 6. Insert only the smallest working spacer allowed by [references/layout-rules.md](references/layout-rules.md). After placement, change only the repeated backslash count inside a whitespace-only `align` block, or remove that entire block when a verified export proves no rule will regress. Never remove or normalize ordinary blank lines or blockquote whitespace. After every export pass, test whether any spacer block is safely unnecessary, merge adjacent compatible spacers, review the Markdown diff, re-export with unchanged settings, rescan from the affected point through the end, and recheck earlier fixes.
 7. Maintain the calibration ledger defined in the layout rules. Stop adjusting a target after three attempts with no improvement and report it. Report a callout taller than one printable page as unavoidable.
 8. When a full temporary export passes, verify the source against the saved hash/inventory. If anything except permitted spacer blocks changed, do not create or replace the named final PDF.
-9. Export the exact named PDF with the same settings and inspect every page again. Delete temporary comparison PDFs and report final spacer count, settings, and unavoidable exceptions.
+9. Export the exact named PDF with the same settings and inspect every page again. Delete temporary comparison PDFs and report final spacer count, settings, and any unavoidable exceptions.
 
 Complete the entire selected note autonomously; do not stop after one violation.
 
