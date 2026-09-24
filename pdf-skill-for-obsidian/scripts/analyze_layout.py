@@ -22,7 +22,9 @@ TOKEN_RE = re.compile(r"[^\W_]+", re.UNICODE)
 MARKDOWN_IMAGE_RE = re.compile(r"!\[[^\]]*\]\(([^)]+)\)|!\[\[([^\]|]+)(?:\|[^\]]+)?\]\]")
 RASTER_SUFFIXES = {".avif", ".bmp", ".gif", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
 LOW_HEADING_LEVELS = {2, 3, 4, 5}
-LOW_HEADING_FRACTION = 0.85
+LOW_HEADING_REVIEW_FRACTION = 0.85
+LOW_HEADING_HARD_FRACTION = 0.90
+MIN_REVIEW_BAND_LINES = 2
 
 
 @dataclass
@@ -304,8 +306,30 @@ def media_led_block(lines: list[str], start: int) -> tuple[int, int] | None:
     return media_index, end
 
 
-def heading_is_too_low(level: int, fraction: float) -> bool:
-    return level in LOW_HEADING_LEVELS and fraction >= LOW_HEADING_FRACTION
+def heading_is_too_low(
+    level: int, fraction: float, same_page_following_lines: int = 0
+) -> bool:
+    """Return whether a heading is unacceptably low on its page.
+
+    The bottom 10% is always too low for H2-H5. The preceding 5% is a
+    review band: keep the heading when at least two rendered lines of its
+    following content remain on the page. This avoids moving a nearly fitting
+    group and creating disproportionate whitespace on the old page.
+    """
+    if level not in LOW_HEADING_LEVELS:
+        return False
+    if fraction >= LOW_HEADING_HARD_FRACTION:
+        return True
+    return (
+        fraction >= LOW_HEADING_REVIEW_FRACTION
+        and same_page_following_lines < MIN_REVIEW_BAND_LINES
+    )
+
+
+def rendered_lines_after(location: Location, pages: list[PageData]) -> int:
+    """Count distinct rendered text lines below a location on the same page."""
+    page = pages[location.page - 1]
+    return len({round(top, 1) for top in page.tops if top > location.top + 2.0})
 
 
 def next_anchor_tokens(lines: list[str], start: int) -> list[str] | None:
@@ -367,7 +391,9 @@ def analyze(note: Path, pdf: Path) -> dict[str, object]:
         for page_index, page in enumerate(document.pages):
             page_tokens: list[str] = []
             page_tops: list[float] = []
+            visible_word_tops: list[float] = []
             for word in page.extract_words(use_text_flow=True):
+                visible_word_tops.append(float(word["top"]))
                 word_tokens = tokens(word["text"])
                 page_tokens.extend(word_tokens)
                 page_tops.extend([float(word["top"])] * len(word_tokens))
@@ -376,7 +402,7 @@ def analyze(note: Path, pdf: Path) -> dict[str, object]:
                     page_tokens,
                     page_tops,
                     float(page.height),
-                    min(page_tops) if page_tops else None,
+                    min(visible_word_tops) if visible_word_tops else None,
                 )
             )
             for image in sorted(page.images, key=lambda item: float(item.get("top", 0.0))):
@@ -528,10 +554,11 @@ def analyze(note: Path, pdf: Path) -> dict[str, object]:
         if heading_locations:
             location = heading_locations[0]
             fraction = location.top / location.pageHeight
-            if heading_is_too_low(level, fraction):
+            following_lines = rendered_lines_after(location, pages)
+            if heading_is_too_low(level, fraction, following_lines):
                 violations.append(
                     Violation(
-                        "heading-bottom-fifteen-percent",
+                        "heading-too-low",
                         index + 1,
                         index + 1,
                         label,

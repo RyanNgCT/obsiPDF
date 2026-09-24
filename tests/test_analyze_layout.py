@@ -15,14 +15,20 @@ SPEC.loader.exec_module(analyze_layout)
 
 
 class HeadingThresholdTests(unittest.TestCase):
-    def test_h2_through_h5_use_bottom_fifteen_percent(self) -> None:
+    def test_h2_through_h5_accept_review_band_with_meaningful_content(self) -> None:
         for level in range(2, 6):
-            self.assertFalse(analyze_layout.heading_is_too_low(level, 0.8499))
-            self.assertTrue(analyze_layout.heading_is_too_low(level, 0.85))
+            self.assertFalse(analyze_layout.heading_is_too_low(level, 0.8499, 0))
+            self.assertTrue(analyze_layout.heading_is_too_low(level, 0.85, 1))
+            self.assertFalse(analyze_layout.heading_is_too_low(level, 0.85, 2))
+            self.assertFalse(analyze_layout.heading_is_too_low(level, 0.8999, 3))
+
+    def test_bottom_ten_percent_remains_a_hard_boundary(self) -> None:
+        for level in range(2, 6):
+            self.assertTrue(analyze_layout.heading_is_too_low(level, 0.90, 10))
 
     def test_h1_and_h6_are_not_forced_by_low_heading_rule(self) -> None:
-        self.assertFalse(analyze_layout.heading_is_too_low(1, 0.99))
-        self.assertFalse(analyze_layout.heading_is_too_low(6, 0.99))
+        self.assertFalse(analyze_layout.heading_is_too_low(1, 0.99, 0))
+        self.assertFalse(analyze_layout.heading_is_too_low(6, 0.99, 0))
 
     def test_short_heading_can_be_disambiguated_before_its_content(self) -> None:
         pages = [
@@ -78,6 +84,17 @@ class HeadingCalloutGroupingTests(unittest.TestCase):
         )
         self.assertIsNotNone(callout)
 
+    def test_unquoted_media_after_callout_is_not_part_of_callout(self) -> None:
+        lines = (
+            "> [!note] Standalone components\n"
+            "> The callout body is complete here.\n\n"
+            "![diagram](diagram.png)\n\n"
+            "- Explanation"
+        ).splitlines()
+        callout = analyze_layout.collect_callouts(lines)[0]
+        self.assertEqual(callout.lines, lines[:2])
+        self.assertEqual(callout.end, 2)
+
 
 class MediaParsingTests(unittest.TestCase):
     def test_markdown_and_wikilink_images_are_recognized(self) -> None:
@@ -132,6 +149,17 @@ class OvercompensationTests(unittest.TestCase):
         self.assertFalse(
             analyze_layout.page_top_overcompensated(
                 analyze_layout.Location(2, 72.0, 842.0), pages
+            )
+        )
+
+    def test_punctuation_only_content_above_target_prevents_false_positive(self) -> None:
+        pages = [
+            analyze_layout.PageData(["normal"], [55.0], 842.0, 55.0),
+            analyze_layout.PageData(["criteria"], [66.0], 842.0, 24.0),
+        ]
+        self.assertFalse(
+            analyze_layout.page_top_overcompensated(
+                analyze_layout.Location(2, 66.0, 842.0), pages
             )
         )
 
