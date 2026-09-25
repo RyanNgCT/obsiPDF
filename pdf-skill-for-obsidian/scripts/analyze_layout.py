@@ -25,6 +25,7 @@ LOW_HEADING_LEVELS = {2, 3, 4, 5}
 LOW_HEADING_REVIEW_FRACTION = 0.85
 LOW_HEADING_HARD_FRACTION = 0.90
 MIN_REVIEW_BAND_LINES = 2
+LIST_ITEM_RE = re.compile(r"^(?P<indent>[ \t]*)(?:[-+*]|\d+[.)])\s+")
 
 
 @dataclass
@@ -306,6 +307,52 @@ def media_led_block(lines: list[str], start: int) -> tuple[int, int] | None:
     return media_index, end
 
 
+def first_nested_list_group(lines: list[str], heading_index: int) -> tuple[int, int] | None:
+    """Find a heading's first list item when that item has nested list content.
+
+    Permit one short lead-in paragraph. Return the first item's source span,
+    ending before its next sibling, so later list items may flow normally.
+    """
+    index = skip_layout_only(lines, heading_index + 1)
+    if index < len(lines) and is_plain_lead_in(lines[index]):
+        lead_lines: list[str] = []
+        while index < len(lines) and lines[index].strip():
+            if LIST_ITEM_RE.match(lines[index]):
+                break
+            if not is_plain_lead_in(lines[index]):
+                return None
+            lead_lines.append(lines[index])
+            index += 1
+        if len(lead_lines) > 2 or sum(len(line_tokens(line)) for line in lead_lines) > 30:
+            return None
+        index = skip_layout_only(lines, index)
+    if index >= len(lines):
+        return None
+    first = LIST_ITEM_RE.match(lines[index])
+    if first is None:
+        return None
+    base_indent = len(first.group("indent").expandtabs(4))
+    nested = False
+    end = index + 1
+    cursor = end
+    while cursor < len(lines):
+        line = lines[cursor]
+        if not line.strip():
+            cursor += 1
+            continue
+        if HEADING_RE.match(line) or CALLOUT_RE.match(line):
+            break
+        item = LIST_ITEM_RE.match(line)
+        indent = len((item.group("indent") if item else line[: len(line) - len(line.lstrip())]).expandtabs(4))
+        if indent <= base_indent:
+            break
+        if item is not None:
+            nested = True
+        end = cursor + 1
+        cursor += 1
+    return (index, end) if nested else None
+
+
 def heading_is_too_low(
     level: int, fraction: float, same_page_following_lines: int = 0
 ) -> bool:
@@ -526,6 +573,7 @@ def analyze(note: Path, pdf: Path) -> dict[str, object]:
         if not content_locations and media_block is None:
             missing.append("following content")
         governed_callout = heading_associated_callout(lines, index, callouts_by_start)
+        nested_list_group = first_nested_list_group(lines, index)
         governed_end = (
             callout_end_locations.get(governed_callout.start)
             if governed_callout is not None
@@ -600,6 +648,27 @@ def analyze(note: Path, pdf: Path) -> dict[str, object]:
                     governed_end.page,
                 )
             )
+
+        if nested_list_group is not None and heading_locations:
+            first_item, block_end = nested_list_group
+            group_lines = [line_tokens(lines[item]) for item in range(first_item, block_end)]
+            group_lines = [item for item in group_lines if item]
+            end_locations = locate(pages, anchor_windows(group_lines[-1], True)) if group_lines else []
+            if not end_locations:
+                unresolved.append(
+                    Unresolved("heading-first-nested-item", index + 1, block_end, label, "nested item end")
+                )
+            elif heading_locations[0].page != end_locations[0].page:
+                violations.append(
+                    Violation(
+                        "heading-first-nested-item",
+                        index + 1,
+                        block_end,
+                        label,
+                        heading_locations[0].page,
+                        end_locations[0].page,
+                    )
+                )
 
         if media_block is not None and heading_locations:
             media_index, block_end = media_block

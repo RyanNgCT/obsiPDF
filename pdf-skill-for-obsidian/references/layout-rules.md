@@ -10,7 +10,7 @@ Reference profile: filename as title, A4 portrait, default margin, 70% downscale
 
 ## Headings
 
-The first substantive content after an H1-H6 is the next paragraph, list, callout, table, code block, image, embed, or mathematical block. Blank lines, comments, and formatter spacers do not count. A heading must share a page with a meaningful start of the block it introduces. For an ordinary paragraph or list, two rendered lines below the heading are sufficient; the remainder may continue onto the next page when moving the group would leave disproportionate whitespace. Indivisible callout and media-led groups still use the stricter complete-group rules below.
+The first substantive content after an H1-H6 is the next paragraph, list, callout, table, code block, image, embed, or mathematical block. Blank lines, comments, and formatter spacers do not count. A heading must share a page with a meaningful start of the block it introduces. For an ordinary paragraph or list, two rendered lines below the heading are sufficient; the remainder may continue onto the next page when moving the group would leave disproportionate whitespace. If the heading is followed by at most one short introductory paragraph and then a list whose first item has nested content, keep the heading, introduction, first item, and that item's nested content on one page when feasible. A parent list line at the foot of a page with its nested detail on the next is not a meaningful complete start for this pattern. Do not require the entire list to fit; anchor any spacer before the heading. Indivisible callout and media-led groups still use the stricter complete-group rules below.
 
 When headings are consecutive, protect the entire group with its first substantive block. Insert spacing before the earliest heading, never within the group.
 
@@ -44,7 +44,7 @@ Remove prior generated spacers before the clean baseline, including legacy white
 
 ## Analysis and sizing
 
-Run `scripts/analyze_layout.py <note.md> <export.pdf> --pretty` and use positioned PDF extraction to locate candidates, then visually inspect every page. The analyzer maps short or repeated callout headers against their later body/boundary anchors, maps raster media between surrounding text anchors, applies the 90% hard boundary and the 85-90% review band to H2-H5 headings, checks heading-associated callout groups, and treats a media-first block plus its immediately accompanying list as one governed heading group. Confirm every `unresolved` item and every vector, formula-only, or ambiguous media block visually. Exit code 1 means confirmed violations; exit code 2 means unresolved visual review remains; only exit code 0 is a fully resolved programmatic pass.
+Run `scripts/analyze_layout.py <note.md> <export.pdf> --pretty` and use positioned PDF extraction to locate candidates, then visually inspect every page. The analyzer maps short or repeated callout headers against their later body/boundary anchors, maps raster media between surrounding text anchors, applies the 90% hard boundary and the 85-90% review band to H2-H5 headings, checks heading-associated callout groups, checks the first nested list item after a short introduction, and treats a media-first block plus its immediately accompanying list as one governed heading group. Confirm every `unresolved` item and every vector, formula-only, or ambiguous media block visually. Exit code 1 means confirmed violations; exit code 2 means unresolved visual review remains; only exit code 0 is a fully resolved programmatic pass.
 
 Keep a calibration ledger for each attempt: target and source anchor; starting page and vertical coordinate; target's rendered height; remaining printable height on that page; units tried; whether the complete target crossed; destination coordinate; and underfill or overcompensation. Preserve the latest non-overcompensated value as the lower bound.
 
@@ -64,7 +64,7 @@ A run is complete only when:
 
 1. Every page of a fresh export has been inspected programmatically and visually.
 2. A final whole-document analyzer run reports no violations; every `unresolved` item has been visually adjudicated and confirmed not to violate a layout rule.
-3. No H1-H6 heading is orphaned from a meaningful start of its governed block, no H2-H5 begins in the bottom 10% of a page, and every heading in the 85-90% review band has at least two rendered lines of following content on the same page.
+3. No H1-H6 heading is orphaned from a meaningful start of its governed block; a first nested list item after a short introduction stays with its heading when feasible; no H2-H5 begins in the bottom 10% of a page; and every heading in the 85-90% review band has at least two rendered lines of following content on the same page.
 4. No feasible complete callout is split.
 5. No unnecessary or adjacent compatible spacer remains.
 6. No blank page, clipping, malformed callout, excessive whitespace, or visible annotation remains.
