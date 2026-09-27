@@ -56,7 +56,7 @@ The moved block must begin within roughly one rendered line of the normal top ma
 
 Fix the earliest violation first unless corrections are proven independent. After each correction pass, review the diff, re-export with unchanged settings, run the analyzer across the entire document, and confirm that no original, downstream, or newly introduced violations remain. Recheck prior fixes and visually adjudicate every `unresolved` result; an empty `violations` array alone is not sufficient. Earlier changes can invalidate every later spacer.
 
-When a user flags a local visual adjustment for the end of the work, finish the other confirmed pagination edits first. Apply that adjustment before final export, then rerun the full analyzer and inspect every page of the resulting PDF. The final adjustment can change pagination elsewhere.
+When a user flags excessive whitespace at a page break, inspect it before continuing to later violations. Measure the last content position on the preceding page and the first content position on the next page; compare these with the clean or spacer-free export. Test smaller integer sizes of the spacer at that anchor, including removal when permitted. If a smaller size improves the flagged gap but creates downstream violations, recalibrate the affected later spacers and compare the resulting whole-document layout before rejecting it. Only call the gap unavoidable after the tested sizes show that no permitted adjustment improves it while keeping the governed block intact. Record that evidence and recheck every page before final export.
 
 ## Completion
 
