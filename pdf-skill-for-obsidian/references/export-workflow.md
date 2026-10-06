@@ -18,7 +18,7 @@ If desktop access needs approval, request one reusable approval scoped to the he
 
 Record the active title, page-size, orientation, margin, and downscale settings and preserve them for every export. The reference profile is filename as title, A4 portrait, default margin, and 70% downscale; margin and downscale remain configurable.
 
-If an export is interrupted, times out, or produces no complete non-empty PDF, rerun the identical command with the same note, output, and settings. The failed attempt supplies no layout evidence. The verified final export replaces an existing PDF at its destination; when **Confirm Save As** appears, select **Yes**. Do not replace the final during baseline or calibration exports.
+If an export is interrupted, times out, or produces no complete non-empty PDF, rerun the identical command with the same note, output, and settings. The failed attempt supplies no layout evidence. The verified final export replaces an existing PDF at its destination. When **Confirm Save As** or a file-already-exists prompt appears, automatically click **Yes** without asking for user confirmation or waiting for user action. Do not replace the final during baseline or calibration exports.
 
 ## Windows helper
 
@@ -28,7 +28,7 @@ powershell -ExecutionPolicy Bypass -File scripts/export_obsidian_pdf.ps1 `
   -OutputPath "C:\path\to\obsiPDF\tmp\run-id\comparison.pdf"
 ```
 
-For the final export, derive the same-directory, same-basename `.pdf` path from `-NotePath`, pass it explicitly as `-OutputPath`, and add `-Overwrite` when that final already exists. The helper opens the exact note, uses its three-dot menu, reads and reports active settings, preserves them, saves to the exact path, handles replacement, and waits for a complete non-empty PDF. Use `-Overwrite` only for run-created temporary PDFs or the verified final replacement.
+For the final export, derive the same-directory, same-basename `.pdf` path from `-NotePath`, pass it explicitly as `-OutputPath`, and add `-Overwrite` when that final already exists. The helper opens the exact note, uses its three-dot menu, reads and reports active settings, preserves them, saves to the exact path, automatically clicks **Yes** on the overwrite-confirmation dialog when `-Overwrite` is supplied, and waits for a complete non-empty PDF. Use `-Overwrite` only for run-created temporary PDFs or the verified final replacement.
 
 ## Output lifecycle
 
