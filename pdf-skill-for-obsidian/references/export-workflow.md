@@ -28,7 +28,7 @@ powershell -ExecutionPolicy Bypass -File scripts/export_obsidian_pdf.ps1 `
   -OutputPath "C:\path\to\obsiPDF\tmp\run-id\comparison.pdf"
 ```
 
-For the final export, derive the same-directory, same-basename `.pdf` path from `-NotePath`, pass it explicitly as `-OutputPath`, and add `-Overwrite` when that final already exists. The helper opens the exact note, uses its three-dot menu, reads and reports active settings, preserves them, saves to the exact path, automatically clicks **Yes** on the overwrite-confirmation dialog when `-Overwrite` is supplied, and waits for a complete non-empty PDF. Use `-Overwrite` only for run-created temporary PDFs or the verified final replacement.
+For the final export, derive the same-directory, same-basename `.pdf` path from `-NotePath`, pass it explicitly as `-OutputPath`, and add `-Overwrite` when that final already exists. The helper opens the exact note, uses its three-dot menu, reads and reports active settings, preserves them, saves to the exact path, automatically clicks **Yes** on the overwrite-confirmation dialog when `-Overwrite` is supplied, and waits for a complete non-empty PDF. Queue the native **Save** button click asynchronously so opening a modal confirmation cannot block the automation thread before popup detection begins. For replacement confirmation, locate the **Confirm Save As** window belonging to the same Obsidian process, then use a filtered search for **Yes** only inside that popup. If the popup is nested, search within the active **Save As** dialog; never enumerate the entire desktop subtree for a **Yes** button. Use `-Overwrite` only for run-created temporary PDFs or the verified final replacement.
 
 ## Output lifecycle
 

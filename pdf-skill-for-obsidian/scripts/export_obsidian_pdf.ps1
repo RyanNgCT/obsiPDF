@@ -59,6 +59,51 @@ function Find-Descendant {
     return $null
 }
 
+function Find-OverwriteConfirmation {
+    param(
+        [System.Windows.Automation.AutomationElement]$SaveDialog,
+        [int]$ProcessId
+    )
+
+    $dialogCondition = [System.Windows.Automation.AndCondition]::new(
+        [System.Windows.Automation.PropertyCondition]::new(
+            [System.Windows.Automation.AutomationElement]::ProcessIdProperty, $ProcessId),
+        [System.Windows.Automation.AndCondition]::new(
+            [System.Windows.Automation.PropertyCondition]::new(
+                [System.Windows.Automation.AutomationElement]::NameProperty, 'Confirm Save As'),
+            [System.Windows.Automation.PropertyCondition]::new(
+                [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+                [System.Windows.Automation.ControlType]::Window)
+        )
+    )
+    $root = [System.Windows.Automation.AutomationElement]::RootElement
+    $dialog = $root.FindFirst(
+        [System.Windows.Automation.TreeScope]::Children, $dialogCondition)
+    if (-not $dialog) {
+        try {
+            $dialog = $SaveDialog.FindFirst(
+                [System.Windows.Automation.TreeScope]::Descendants, $dialogCondition)
+        } catch [System.Windows.Automation.ElementNotAvailableException] {
+            return $null
+        }
+    }
+    if (-not $dialog) { return $null }
+
+    $yesCondition = [System.Windows.Automation.AndCondition]::new(
+        [System.Windows.Automation.PropertyCondition]::new(
+            [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+            [System.Windows.Automation.ControlType]::Button),
+        [System.Windows.Automation.OrCondition]::new(
+            [System.Windows.Automation.PropertyCondition]::new(
+                [System.Windows.Automation.AutomationElement]::NameProperty, 'Yes'),
+            [System.Windows.Automation.PropertyCondition]::new(
+                [System.Windows.Automation.AutomationElement]::NameProperty, '&Yes')
+        )
+    )
+    return $dialog.FindFirst(
+        [System.Windows.Automation.TreeScope]::Descendants, $yesCondition)
+}
+
 function Find-ExportMenuItem {
     param([System.Windows.Automation.AutomationElement]$Element)
     $walker = [System.Windows.Automation.TreeWalker]::RawViewWalker
@@ -86,6 +131,7 @@ using System.Runtime.InteropServices;
 public static class ObsidianPdfWindow {
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
     [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+    [DllImport("user32.dll", SetLastError = true)] public static extern bool PostMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
 }
 '@
 
@@ -217,18 +263,23 @@ $saveButton = Find-Descendant -Element $saveDialog -Predicate {
 if (-not $fileNameInput -or -not $saveButton) { throw 'Save As controls were not found.' }
 
 $fileNameInput.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue($resolvedOutput)
-$saveButton.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+# Queue BM_CLICK to the identified native Save button so a modal confirmation
+# cannot block this automation thread before it starts looking for the popup.
+$saveButtonHandle = [IntPtr]$saveButton.Current.NativeWindowHandle
+if ($saveButtonHandle -eq [IntPtr]::Zero) {
+    throw 'The Windows Save button has no native window handle.'
+}
+if (-not [ObsidianPdfWindow]::PostMessage(
+    $saveButtonHandle, 0x00F5, [IntPtr]::Zero, [IntPtr]::Zero)) {
+    throw 'Could not queue the Windows Save button click.'
+}
 
 if ($Overwrite) {
     $confirmation = Wait-Until -Timeout 60 -FailureMessage 'No overwrite confirmation was shown.' -Condition {
         if (-not (Test-Path -LiteralPath $resolvedOutput) -or
             (Get-Item -LiteralPath $resolvedOutput).LastWriteTimeUtc -le $beforeWrite) {
-            $root = [System.Windows.Automation.AutomationElement]::RootElement
-            return Find-Descendant -Element $root -Predicate {
-                param($element)
-                $element.Current.Name -match '^(Yes|&Yes)$' -and
-                    $element.Current.ControlType -eq [System.Windows.Automation.ControlType]::Button
-            }
+            return Find-OverwriteConfirmation -SaveDialog $saveDialog `
+                -ProcessId $obsidianWindow.Current.ProcessId
         }
         return $true
     }

@@ -30,6 +30,10 @@ Read [references/layout-rules.md](references/layout-rules.md) before editing pag
 
 Complete the entire selected note autonomously; do not stop after one violation.
 
+## Fast Windows replacement confirmation
+
+Use `scripts/export_obsidian_pdf.ps1` for Windows exports. Activate the identified native **Save** button by queuing `BM_CLICK` (`0x00F5`) with `PostMessage`, then begin confirmation detection immediately. Do not call synchronous UI Automation `Invoke()` on **Save**: opening the modal popup can block that call for about 10 seconds before detection starts. Find **Confirm Save As** in the same Obsidian process, searching top-level windows first and the active **Save As** dialog if nested; use a filtered `FindFirst` for **Yes** or **&Yes** only inside that popup. Never search the entire desktop subtree for a **Yes** button. Continue checking that the PDF was written successfully. The measured Save-to-Yes time was about 166 ms with this method; actual timing can vary.
+
 ## Source invariants
 
 - Preserve headings, prose, links, embeds, tables, code, frontmatter, mathematics, callout syntax, indentation, and pre-existing `<br>` elements byte-for-byte and in order. Never delete, rename, reorder, rewrite, move, or normalize them.
