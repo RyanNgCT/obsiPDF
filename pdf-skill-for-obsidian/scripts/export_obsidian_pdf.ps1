@@ -160,7 +160,7 @@ $obsidianWindow = Wait-Until -FailureMessage "Obsidian did not open the requeste
     $windows = @(Get-RootWindows)
     for ($index = 0; $index -lt $windows.Count; $index++) {
         $window = $windows[$index]
-        if ($window.Current.Name -like "$noteTitle*Obsidian*") { return $window }
+        if (($window.Current.Name -replace '&', '') -like ("$noteTitle*Obsidian*" -replace '&', '')) { return $window }
     }
     return $null
 }

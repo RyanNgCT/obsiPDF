@@ -444,6 +444,11 @@ def analyze(note: Path, pdf: Path) -> dict[str, object]:
                 word_tokens = tokens(word["text"])
                 page_tokens.extend(word_tokens)
                 page_tops.extend([float(word["top"])] * len(word_tokens))
+            # Raster media is visible content even when it contains no PDF text.
+            visible_word_tops.extend(
+                float(image["top"]) for image in page.images
+                if image.get("top") is not None
+            )
             pages.append(
                 PageData(
                     page_tokens,
