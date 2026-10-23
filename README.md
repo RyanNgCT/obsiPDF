@@ -4,8 +4,10 @@ A reusable Codex skill for polishing the pagination of Obsidian-flavoured Markdo
 
 The skill dynamically adds managed LaTeX whitespace so that:
 - H1-H6 headings stay with the complete block they introduce, including a directly governed callout and an optional short lead-in paragraph.
-- H2-H5 sections that would begin in the bottom 15% of a page are moved to the next page.
+- H2-H5 headings in the bottom 10% of a page move to the next page. Headings in the preceding 5% review band move only when fewer than two rendered lines of following content fit.
 - Complete [Obsidian callouts](https://obsidian.md/help/callouts)—including their headers, text, and media—stay on one page whenever the callout fits within a printable page.
+- Headings, their introductory descriptions, associated diagrams/lists, and complete code blocks stay together when the group fits on one printable page. Oversized examples use smaller feasible groups and keep individual code blocks intact where possible.
+- Empty quote borders left behind by moved headings are removed using spacers outside blockquotes and narrowly scoped cleanup of redundant quote-only markers.
 - Previous generated spacing can be removed and recalculated after the note changes.
 - If the requested PDF does not exist yet, the skill can create the baseline export through Obsidian before beginning layout corrections.
 - Spacer sizes are boundary-tested so moved content starts at the top margin instead of being pushed down by overflow from an oversized spacer.
