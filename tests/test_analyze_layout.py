@@ -14,6 +14,16 @@ sys.modules[SPEC.name] = analyze_layout
 SPEC.loader.exec_module(analyze_layout)
 
 
+def spacer(prefix: str = "", units: int = 1) -> list[str]:
+    return [
+        f"{prefix}$$",
+        f"{prefix}\\begin{{align}}",
+        f"{prefix}{'\\\\' * units}",
+        f"{prefix}\\end{{align}}",
+        f"{prefix}$$",
+    ]
+
+
 class HeadingThresholdTests(unittest.TestCase):
     def test_h2_through_h5_accept_review_band_with_meaningful_content(self) -> None:
         for level in range(2, 6):
@@ -46,6 +56,28 @@ class HeadingThresholdTests(unittest.TestCase):
         inferred = analyze_layout.nearest_location_before(candidates, boundary)
         self.assertIsNotNone(inferred)
         self.assertEqual((inferred.page, inferred.top), (1, 795.0))
+
+    def test_repeated_text_on_one_page_is_not_treated_as_unique(self) -> None:
+        pages = [
+            analyze_layout.PageData(
+                ["repeat", "repeat", "x"], [10.0, 90.0, 200.0], 842.0
+            )
+        ]
+        self.assertEqual(analyze_layout.locate(pages, [["repeat"]]), [])
+        self.assertEqual(
+            len(analyze_layout.locate_all(pages, [["repeat"]])), 2
+        )
+
+    def test_longer_unique_window_still_resolves(self) -> None:
+        pages = [
+            analyze_layout.PageData(
+                ["repeat", "x", "repeat", "y"], [10.0, 20.0, 30.0, 40.0], 842.0
+            )
+        ]
+        found = analyze_layout.locate(
+            pages, analyze_layout.anchor_windows(["repeat", "x"], False)
+        )
+        self.assertEqual((found[0].page, found[0].top), (1, 10.0))
 
 
 class HeadingCalloutGroupingTests(unittest.TestCase):
@@ -121,6 +153,14 @@ class MediaParsingTests(unittest.TestCase):
         lines = "#### Diagram\n![diagram](diagram.png)\n- First\n\n- Second".splitlines()
         self.assertEqual(analyze_layout.media_led_block(lines, 1), (1, 3))
 
+    def test_media_led_block_includes_tight_bullet_list(self) -> None:
+        lines = "#### Diagram\n![diagram](diagram.png)\n- First\n- Second".splitlines()
+        self.assertEqual(analyze_layout.media_led_block(lines, 1), (1, 4))
+
+    def test_media_led_block_includes_tight_numbered_list(self) -> None:
+        lines = "#### Diagram\n![diagram](diagram.png)\n1. First\n2. Second".splitlines()
+        self.assertEqual(analyze_layout.media_led_block(lines, 1), (1, 4))
+
 
 class CalloutAnchorTests(unittest.TestCase):
     def test_short_header_is_resolved_before_body_on_next_page(self) -> None:
@@ -188,6 +228,11 @@ class SpacerAndCommentTests(unittest.TestCase):
     def test_comment_and_spacer_are_both_layout_only(self) -> None:
         lines = ["%% hidden %%", "", "$$", r"\begin{align}", "\\\\", r"\end{align}", "$$", "Body"]
         self.assertEqual(analyze_layout.skip_layout_only(lines, 0), 7)
+
+    def test_fenced_spacer_is_not_layout_only(self) -> None:
+        lines = ["```latex", *spacer(), "```", "", "Body"]
+        self.assertIsNone(analyze_layout.legacy_spacer_end(lines, 1))
+        self.assertEqual(analyze_layout.skip_layout_only(lines, 0), 0)
 
     def test_line_height_is_derived_from_rendered_tops(self) -> None:
         page = analyze_layout.PageData(["a", "b", "c"], [70.0, 82.0, 94.0], 842.0, 70.0)

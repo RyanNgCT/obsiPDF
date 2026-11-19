@@ -31,6 +31,7 @@ ORDERED_ITEM_RE = re.compile(r"^\s{0,3}\d+[.)]\s+")
 NESTED_LIST_RE = re.compile(r"^\s+(?:[-+*]|\d+[.)])\s+")
 BLOCKQUOTE_RE = re.compile(r"^\s*>")
 BACKSLASH_RE = re.compile(r"\\+")
+FENCE_RE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})(.*)$")
 
 QUOTE_PREFIX_RE = re.compile(r"^\s*(?:>\s*)+")
 LIST_PREFIX_RE = re.compile(r"^\s{0,3}(?:[-+*]|\d+[.)])\s+")
@@ -102,6 +103,32 @@ def strip_quote(line: str) -> str:
     return QUOTE_PREFIX_RE.sub("", line).strip()
 
 
+def fenced_code_lines(lines: list[str]) -> list[bool]:
+    """Mark lines inside fenced code so literal examples are not layout content."""
+    mask = [False] * len(lines)
+    fence_char: str | None = None
+    fence_length = 0
+    for index, line in enumerate(lines):
+        content = QUOTE_PREFIX_RE.sub("", line)
+        match = FENCE_RE.match(content)
+        if fence_char is None:
+            if match:
+                fence_char = match.group(1)[0]
+                fence_length = len(match.group(1))
+                mask[index] = True
+        else:
+            mask[index] = True
+            if (
+                match
+                and match.group(1)[0] == fence_char
+                and len(match.group(1)) >= fence_length
+                and not match.group(2).strip()
+            ):
+                fence_char = None
+                fence_length = 0
+    return mask
+
+
 def is_comment_line(content: str) -> bool:
     return (
         content.startswith("<!--")
@@ -168,13 +195,7 @@ def sequence_starts(haystack: list[str], needle: list[str]) -> list[int]:
 
 def locate(pages: list[PageData], candidates: list[list[str]]) -> list[Location]:
     for candidate in candidates:
-        matches: list[Location] = []
-        for page_index, page in enumerate(pages):
-            starts = sequence_starts(page.tokens, candidate)
-            if starts:
-                matches.append(
-                    Location(page_index + 1, page.tops[starts[0]], page.height)
-                )
+        matches = locate_all(pages, [candidate])
         if len(matches) == 1:
             return matches
     return []
@@ -238,8 +259,12 @@ def collect_callouts(lines: list[str]) -> list[Callout]:
     return callouts
 
 
-def legacy_spacer_end(lines: list[str], index: int) -> int | None:
-    if index + 4 >= len(lines):
+def legacy_spacer_end(
+    lines: list[str], index: int, literal: list[bool] | None = None
+) -> int | None:
+    if literal is None:
+        literal = fenced_code_lines(lines)
+    if index + 4 >= len(lines) or any(literal[index : index + 5]):
         return None
     if strip_quote(lines[index]) != "$$" or strip_quote(lines[index + 1]) != r"\begin{align}":
         return None
@@ -251,6 +276,7 @@ def legacy_spacer_end(lines: list[str], index: int) -> int | None:
 
 
 def skip_layout_only(lines: list[str], index: int) -> int:
+    literal = fenced_code_lines(lines)
     while index < len(lines):
         if not lines[index].strip():
             index += 1
@@ -258,7 +284,7 @@ def skip_layout_only(lines: list[str], index: int) -> int:
         if is_comment_line(strip_quote(lines[index])):
             index += 1
             continue
-        spacer_end = legacy_spacer_end(lines, index)
+        spacer_end = legacy_spacer_end(lines, index, literal)
         if spacer_end is not None:
             index = spacer_end
             continue
@@ -307,9 +333,10 @@ def markdown_image_target(line: str) -> str | None:
 def media_led_block(lines: list[str], start: int) -> tuple[int, int] | None:
     """Return a media-first block and any immediately accompanying list.
 
-    The returned pair is ``(media line, end-exclusive line)``. Blank lines are
-    allowed between list items, as in Obsidian notes, but a heading, callout,
-    paragraph, table, code block, or second media item ends the governed block.
+    The returned pair is ``(media line, end-exclusive line)``. Tightly spaced
+    items of either list kind are included. Blank lines may continue a numbered
+    list, but a blank line ends a bulleted list's association. A heading,
+    callout, paragraph, table, code block, or second media item ends the block.
     """
     media_index = skip_layout_only(lines, start)
     if media_index >= len(lines) or markdown_image_target(lines[media_index]) is None:
@@ -319,6 +346,7 @@ def media_led_block(lines: list[str], start: int) -> tuple[int, int] | None:
         index += 1
     if index >= len(lines) or not LIST_ANY_RE.match(lines[index]):
         return media_index, media_index + 1
+    ordered = ORDERED_ITEM_RE.match(lines[index]) is not None
     end = index + 1
     while end < len(lines):
         stripped = lines[end].strip()
@@ -326,7 +354,7 @@ def media_led_block(lines: list[str], start: int) -> tuple[int, int] | None:
             probe = end + 1
             while probe < len(lines) and not lines[probe].strip():
                 probe += 1
-            if probe < len(lines) and ORDERED_ITEM_RE.match(lines[probe]):
+            if probe < len(lines) and ordered and ORDERED_ITEM_RE.match(lines[probe]):
                 end = probe + 1
                 continue
             break
@@ -335,6 +363,11 @@ def media_led_block(lines: list[str], start: int) -> tuple[int, int] | None:
         if markdown_image_target(lines[end]) is not None or stripped.startswith(("|", "```", "~~~", "$$")):
             break
         if NESTED_LIST_RE.match(lines[end]):
+            end += 1
+            continue
+        item = LIST_ANY_RE.match(lines[end])
+        item_is_ordered = ORDERED_ITEM_RE.match(lines[end]) is not None
+        if item is not None and item_is_ordered == ordered:
             end += 1
             continue
         break

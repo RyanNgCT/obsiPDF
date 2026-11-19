@@ -30,6 +30,67 @@ function Wait-Until {
     throw $FailureMessage
 }
 
+function Test-PdfReadable {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    try {
+        $stream = [IO.File]::Open(
+            $Path,
+            [IO.FileMode]::Open,
+            [IO.FileAccess]::Read,
+            [IO.FileShare]::Read)
+        try {
+            if ($stream.Length -lt 10) { return $false }
+            $header = New-Object byte[] 5
+            if ($stream.Read($header, 0, 5) -ne 5) { return $false }
+            if ([Text.Encoding]::ASCII.GetString($header) -ne '%PDF-') { return $false }
+            $tailLength = [Math]::Min(2048, [int]$stream.Length)
+            $stream.Seek(-$tailLength, [IO.SeekOrigin]::End) | Out-Null
+            $tail = New-Object byte[] $tailLength
+            $read = $stream.Read($tail, 0, $tailLength)
+            $tailText = [Text.Encoding]::ASCII.GetString($tail, 0, $read)
+            return ($tailText.TrimEnd() -match '%%EOF$')
+        } finally {
+            $stream.Dispose()
+        }
+    } catch {
+        return $false
+    }
+}
+
+function Wait-ForPdf {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][DateTime]$After,
+        [int]$Timeout = $TimeoutSeconds,
+        [int]$StableMilliseconds = 750
+    )
+    $deadline = [DateTime]::UtcNow.AddSeconds($Timeout)
+    $lastLength = -1
+    $lastWrite = [DateTime]::MinValue
+    $stableSince = $null
+    do {
+        if (Test-Path -LiteralPath $Path -PathType Leaf) {
+            $file = Get-Item -LiteralPath $Path
+            if ($file.Length -gt 0 -and $file.LastWriteTimeUtc -gt $After) {
+                if ($file.Length -eq $lastLength -and $file.LastWriteTimeUtc -eq $lastWrite) {
+                    if ($null -eq $stableSince) {
+                        $stableSince = [DateTime]::UtcNow
+                    } elseif ((([DateTime]::UtcNow - $stableSince).TotalMilliseconds -ge $StableMilliseconds) -and
+                        (Test-PdfReadable -Path $Path)) {
+                        return $file
+                    }
+                } else {
+                    $lastLength = $file.Length
+                    $lastWrite = $file.LastWriteTimeUtc
+                    $stableSince = $null
+                }
+            }
+        }
+        Start-Sleep -Milliseconds 250
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw "Obsidian did not finish writing a stable, readable PDF: $Path"
+}
+
 function Get-RootWindows {
     $root = [System.Windows.Automation.AutomationElement]::RootElement
     return $root.FindAll(
@@ -299,12 +360,7 @@ if ($Overwrite) {
     }
 }
 
-Wait-Until -FailureMessage "Obsidian did not finish writing the PDF: $resolvedOutput" -Condition {
-    if (-not (Test-Path -LiteralPath $resolvedOutput)) { return $null }
-    $file = Get-Item -LiteralPath $resolvedOutput
-    if ($file.Length -gt 0 -and $file.LastWriteTimeUtc -gt $beforeWrite) { return $file }
-    return $null
-} | Out-Null
+Wait-ForPdf -Path $resolvedOutput -After $beforeWrite -Timeout $TimeoutSeconds | Out-Null
 
 [ordered]@{
     notePath = $resolvedNote

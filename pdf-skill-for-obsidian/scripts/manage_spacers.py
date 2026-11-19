@@ -15,12 +15,14 @@ from pathlib import Path
 
 QUOTE_RE = re.compile(r"^(\s*(?:>\s*)+)")
 BACKSLASH_RE = re.compile(r"\\+")
+FENCE_RE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})(.*)$")
 
 
 @dataclass(frozen=True)
 class TextFile:
     path: Path
     lines: list[str]
+    endings: list[str]
     newline: str
     bom: bool
     final_newline: bool
@@ -30,14 +32,53 @@ def read_text_file(path: Path) -> TextFile:
     raw = path.read_bytes()
     bom = raw.startswith(b"\xef\xbb\xbf")
     text = raw.decode("utf-8-sig")
-    newline = "\r\n" if "\r\n" in text else "\n"
-    return TextFile(path, text.splitlines(), newline, bom, text.endswith(("\n", "\r")))
+    parts = re.split(r"(\r\n|\n|\r)", text)
+    lines: list[str] = []
+    endings: list[str] = []
+    for index in range(0, len(parts), 2):
+        content = parts[index]
+        ending = parts[index + 1] if index + 1 < len(parts) else ""
+        if index == len(parts) - 1 and content == "":
+            continue
+        lines.append(content)
+        endings.append(ending)
+    newline = next((ending for ending in endings if ending), "\n")
+    return TextFile(path, lines, endings, newline, bom, bool(endings and endings[-1]))
 
 
 def write_text_file(source: TextFile, lines: list[str]) -> None:
-    text = source.newline.join(lines)
-    if source.final_newline:
-        text += source.newline
+    source_literal = fenced_code_lines(source.lines)
+    content_endings: list[str] = []
+    index = 0
+    while index < len(source.lines):
+        legacy = legacy_block_at(source.lines, index, source_literal)
+        if legacy:
+            index, _ = legacy
+            continue
+        content_endings.append(source.endings[index])
+        index += 1
+
+    output_endings = [source.newline] * len(lines)
+    target_literal = fenced_code_lines(lines)
+    content_index = 0
+    index = 0
+    while index < len(lines):
+        legacy = legacy_block_at(lines, index, target_literal)
+        if legacy:
+            index, _ = legacy
+            continue
+        if content_index < len(content_endings):
+            output_endings[index] = content_endings[content_index]
+            content_index += 1
+        index += 1
+
+    if lines:
+        if source.final_newline:
+            if not output_endings[-1]:
+                output_endings[-1] = source.newline
+        else:
+            output_endings[-1] = ""
+    text = "".join(line + ending for line, ending in zip(lines, output_endings))
     data = text.encode("utf-8")
     if source.bom:
         data = b"\xef\xbb\xbf" + data
@@ -60,9 +101,41 @@ def strip_quote(line: str) -> str:
     return re.sub(r"^\s*(?:>\s*)+", "", line).strip()
 
 
-def legacy_block_at(lines: list[str], index: int) -> tuple[int, int] | None:
+def fenced_code_lines(lines: list[str]) -> list[bool]:
+    """Mark lines inside fenced code so literal examples are never edited."""
+    mask = [False] * len(lines)
+    fence_char: str | None = None
+    fence_length = 0
+    for index, line in enumerate(lines):
+        content = QUOTE_RE.sub("", line)
+        match = FENCE_RE.match(content)
+        if fence_char is None:
+            if match:
+                fence_char = match.group(1)[0]
+                fence_length = len(match.group(1))
+                mask[index] = True
+        else:
+            mask[index] = True
+            if (
+                match
+                and match.group(1)[0] == fence_char
+                and len(match.group(1)) >= fence_length
+                and not match.group(2).strip()
+            ):
+                fence_char = None
+                fence_length = 0
+    return mask
+
+
+def legacy_block_at(
+    lines: list[str], index: int, literal: list[bool] | None = None
+) -> tuple[int, int] | None:
     """Return (end-exclusive, literal backslash count) for a legacy spacer."""
-    if index + 4 >= len(lines) or strip_quote(lines[index]) != "$$":
+    if literal is None:
+        literal = fenced_code_lines(lines)
+    if index + 4 >= len(lines) or any(literal[index : index + 5]):
+        return None
+    if strip_quote(lines[index]) != "$$":
         return None
     if strip_quote(lines[index + 1]) != r"\begin{align}":
         return None
@@ -86,43 +159,44 @@ def merge_adjacent_legacy_blocks(lines: list[str]) -> tuple[list[str], int, int]
     """Combine compatible whitespace-only align blocks separated only by blanks.
 
     Returns the updated lines, number of groups changed, and number of surplus
-    blocks removed. Literal backslash counts are added exactly so pagination
-    height is preserved.
+    blocks removed. Literal backslash counts are added so the merged spacer
+    retains their combined height. Blank lines between blocks are retained.
     """
     updated = list(lines)
+    literal = fenced_code_lines(updated)
     groups_changed = 0
     blocks_removed = 0
     index = 0
     while index < len(updated):
-        first = legacy_block_at(updated, index)
+        first = legacy_block_at(updated, index, literal)
         if not first:
             index += 1
             continue
 
         first_end, total_backslashes = first
         prefix = quote_prefix(updated[index + 2])
-        group_end = first_end
-        group_blocks = 1
+        group_blocks = [(index, first_end)]
+        cursor = first_end
 
         while True:
-            next_start = group_end
+            next_start = cursor
             while next_start < len(updated) and not updated[next_start].strip():
                 next_start += 1
-            following = legacy_block_at(updated, next_start)
+            following = legacy_block_at(updated, next_start, literal)
             if not following or quote_prefix(updated[next_start + 2]) != prefix:
                 break
-            group_end, backslashes = following
-            total_backslashes += backslashes
-            group_blocks += 1
+            group_blocks.append((next_start, following[0]))
+            total_backslashes += following[1]
+            cursor = following[0]
 
-        if group_blocks > 1:
+        if len(group_blocks) > 1:
             updated[index + 2] = prefix + ("\\" * total_backslashes)
-            del updated[first_end:group_end]
+            for start, end in reversed(group_blocks[1:]):
+                del updated[start:end]
+                del literal[start:end]
             groups_changed += 1
-            blocks_removed += group_blocks - 1
-            index = first_end
-        else:
-            index = first_end
+            blocks_removed += len(group_blocks) - 1
+        index = first_end
 
     return updated, groups_changed, blocks_removed
 
@@ -131,8 +205,9 @@ def remove_legacy_blocks(lines: list[str]) -> tuple[list[str], int]:
     output: list[str] = []
     count = 0
     index = 0
+    literal = fenced_code_lines(lines)
     while index < len(lines):
-        legacy = legacy_block_at(lines, index)
+        legacy = legacy_block_at(lines, index, literal)
         if legacy:
             index, _ = legacy
             count += 1
@@ -158,11 +233,12 @@ def legacy_group_before(
     by merge-adjacent and keeps both resize and removal linear in the file.
     """
     group: list[tuple[int, int, int]] = []
+    literal = fenced_code_lines(lines)
     cursor = previous_nonblank(lines, anchor)
     prefix: str | None = None
     while cursor >= 5:
         start = cursor - 5
-        legacy = legacy_block_at(lines, start)
+        legacy = legacy_block_at(lines, start, literal)
         if not legacy or legacy[0] != cursor:
             break
         block_prefix = quote_prefix(lines[start + 2])
@@ -177,10 +253,11 @@ def legacy_group_before(
 
 def command_list(args: argparse.Namespace) -> int:
     source = read_text_file(args.file)
+    literal = fenced_code_lines(source.lines)
     count = 0
     index = 0
     while index < len(source.lines):
-        legacy = legacy_block_at(source.lines, index)
+        legacy = legacy_block_at(source.lines, index, literal)
         if legacy:
             end, backslashes = legacy
             units = backslashes // 2 if backslashes % 2 == 0 else "non-paired"
@@ -217,27 +294,65 @@ def command_merge_adjacent(args: argparse.Namespace) -> int:
     return 0
 
 
-def immutable_content_lines(lines: list[str]) -> list[str]:
+def immutable_content_lines(
+    lines: list[str], literal: list[bool] | None = None
+) -> list[str]:
     """Return all user content while excluding only spacer blocks."""
+    if literal is None:
+        literal = fenced_code_lines(lines)
     output: list[str] = []
     index = 0
     while index < len(lines):
-        legacy = legacy_block_at(lines, index)
+        legacy = legacy_block_at(lines, index, literal)
         if legacy:
             index, _ = legacy
             continue
-        if lines[index].strip():
-            output.append(lines[index])
+        output.append(lines[index])
         index += 1
     return output
+
+
+def immutable_content_text(
+    source: TextFile, literal: list[bool] | None = None
+) -> str:
+    """Return source text with spacer blocks removed and endings preserved."""
+    if literal is None:
+        literal = fenced_code_lines(source.lines)
+    output: list[str] = []
+    index = 0
+    while index < len(source.lines):
+        legacy = legacy_block_at(source.lines, index, literal)
+        if legacy:
+            index, _ = legacy
+            continue
+        output.append(source.lines[index] + source.endings[index])
+        index += 1
+    return "".join(output)
 
 
 def command_content_hash(args: argparse.Namespace) -> int:
     """Hash immutable source content and list its headings for edit verification."""
     source = read_text_file(args.file)
-    lines = immutable_content_lines(source.lines)
-    digest = hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()
-    headings = [line for line in lines if re.match(r"^#{1,6}\s+\S", line)]
+    literal = fenced_code_lines(source.lines)
+    text = immutable_content_text(source, literal)
+    data = text.encode("utf-8")
+    if source.bom:
+        data = b"\xef\xbb\xbf" + data
+    digest = hashlib.sha256(data).hexdigest()
+
+    headings: list[str] = []
+    index = 0
+    while index < len(source.lines):
+        legacy = legacy_block_at(source.lines, index, literal)
+        if legacy:
+            index, _ = legacy
+            continue
+        if not literal[index] and re.match(
+            r"^#{1,6}\s+\S", strip_quote(source.lines[index])
+        ):
+            headings.append(source.lines[index])
+        index += 1
+
     print(f"sha256={digest}")
     print(f"headings={len(headings)}")
     for heading in headings:
@@ -297,14 +412,13 @@ def command_set_legacy_before(args: argparse.Namespace) -> int:
         raise ValueError("No annotation-free spacer was found immediately before target")
 
     start = group[0][0]
-    end = group[-1][1]
     previous_backslashes = sum(block[2] for block in group)
     previous_units = previous_backslashes / 2
     updated = list(source.lines)
     prefix = quote_prefix(updated[start + 2])
-    replacement = updated[start : start + 5]
-    replacement[2] = prefix + (r"\\" * args.lines)
-    updated[start:end] = replacement
+    updated[start + 2] = prefix + (r"\\" * args.lines)
+    for block_start, block_end, _ in reversed(group[1:]):
+        del updated[block_start:block_end]
     write_text_file(source, updated)
     print(
         f"updated spacer previous_units={previous_units:g} "
@@ -321,10 +435,10 @@ def command_remove_legacy_before(args: argparse.Namespace) -> int:
     if not group:
         raise ValueError("No annotation-free spacer was found immediately before target")
 
-    start = group[0][0]
-    end = group[-1][1]
     previous_units = sum(block[2] for block in group) / 2
-    updated = source.lines[:start] + source.lines[end:]
+    updated = list(source.lines)
+    for block_start, block_end, _ in reversed(group):
+        del updated[block_start:block_end]
     write_text_file(source, updated)
     print(
         f"removed spacer previous_units={previous_units:g} "
