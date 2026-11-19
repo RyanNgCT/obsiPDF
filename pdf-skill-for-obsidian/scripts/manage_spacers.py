@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""List, remove, insert, resize, and normalize Obsidian PDF spacer blocks."""
+"""List, remove, insert, resize, and merge Obsidian PDF spacer blocks."""
 
 from __future__ import annotations
 
@@ -13,18 +13,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-START_TOKEN = "obsidian-pdf-formatter:start"
-END_TOKEN = "obsidian-pdf-formatter:end"
-START_RE = re.compile(
-    rf"^\s*(?:>\s*)*(?:<!--\s*|%%\s*){re.escape(START_TOKEN)}\b"
-)
-END_RE = re.compile(
-    rf"^\s*(?:>\s*)*(?:<!--\s*|%%\s*){re.escape(END_TOKEN)}(?:\s*-->|\s*%%)"
-)
-ID_RE = re.compile(r'\bid="([^"]+)"')
-LINES_RE = re.compile(r'\blines="(\d+)"')
 QUOTE_RE = re.compile(r"^(\s*(?:>\s*)+)")
-SAFE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
+BACKSLASH_RE = re.compile(r"\\+")
 
 
 @dataclass(frozen=True)
@@ -77,7 +67,7 @@ def legacy_block_at(lines: list[str], index: int) -> tuple[int, int] | None:
     if strip_quote(lines[index + 1]) != r"\begin{align}":
         return None
     body = strip_quote(lines[index + 2])
-    if not re.fullmatch(r"\\+", body):
+    if not BACKSLASH_RE.fullmatch(body):
         return None
     if strip_quote(lines[index + 3]) != r"\end{align}":
         return None
@@ -88,7 +78,7 @@ def legacy_block_at(lines: list[str], index: int) -> tuple[int, int] | None:
 
 def quote_prefix(line: str) -> str:
     """Return the indentation/block-quote prefix preceding visible content."""
-    match = re.match(r"^(\s*(?:>\s*)*)", line)
+    match = QUOTE_RE.match(line)
     return match.group(1) if match else ""
 
 
@@ -137,92 +127,81 @@ def merge_adjacent_legacy_blocks(lines: list[str]) -> tuple[list[str], int, int]
     return updated, groups_changed, blocks_removed
 
 
-def managed_blocks(lines: list[str]) -> list[tuple[int, int, str, int | None]]:
-    blocks: list[tuple[int, int, str, int | None]] = []
-    index = 0
-    while index < len(lines):
-        if not START_RE.match(lines[index]):
-            index += 1
-            continue
-        start = index
-        id_match = ID_RE.search(lines[index])
-        identifier = id_match.group(1) if id_match else "unknown"
-        line_match = LINES_RE.search(lines[index])
-        units = int(line_match.group(1)) if line_match else None
-        index += 1
-        while index < len(lines) and not END_RE.match(lines[index]):
-            index += 1
-        if index >= len(lines):
-            raise ValueError(f"Unclosed managed spacer beginning at line {start + 1}")
-        blocks.append((start, index + 1, identifier, units))
-        index += 1
-    return blocks
-
-
-def remove_blocks(lines: list[str], include_legacy: bool) -> tuple[list[str], int, int]:
+def remove_legacy_blocks(lines: list[str]) -> tuple[list[str], int]:
     output: list[str] = []
-    managed_count = 0
-    legacy_count = 0
+    count = 0
     index = 0
     while index < len(lines):
-        if START_RE.match(lines[index]):
-            managed_count += 1
-            index += 1
-            while index < len(lines) and not END_RE.match(lines[index]):
-                index += 1
-            if index >= len(lines):
-                raise ValueError("Unclosed managed spacer block")
-            index += 1
-            continue
-        legacy = legacy_block_at(lines, index) if include_legacy else None
+        legacy = legacy_block_at(lines, index)
         if legacy:
             index, _ = legacy
-            legacy_count += 1
+            count += 1
             continue
         output.append(lines[index])
         index += 1
+    return output, count
 
-    return output, managed_count, legacy_count
+
+def previous_nonblank(lines: list[str], index: int) -> int:
+    while index > 0 and not lines[index - 1].strip():
+        index -= 1
+    return index
+
+
+def legacy_group_before(
+    lines: list[str], anchor: int
+) -> list[tuple[int, int, int]]:
+    """Return adjacent legacy blocks before an anchor, nearest block last.
+
+    Blocks may be separated only by blank lines and must share the same
+    indentation/block-quote prefix. This mirrors the page-break grouping used
+    by merge-adjacent and keeps both resize and removal linear in the file.
+    """
+    group: list[tuple[int, int, int]] = []
+    cursor = previous_nonblank(lines, anchor)
+    prefix: str | None = None
+    while cursor >= 5:
+        start = cursor - 5
+        legacy = legacy_block_at(lines, start)
+        if not legacy or legacy[0] != cursor:
+            break
+        block_prefix = quote_prefix(lines[start + 2])
+        if prefix is None:
+            prefix = block_prefix
+        elif block_prefix != prefix:
+            break
+        group.insert(0, (start, cursor, legacy[1]))
+        cursor = previous_nonblank(lines, start)
+    return group
 
 
 def command_list(args: argparse.Namespace) -> int:
     source = read_text_file(args.file)
-    found = managed_blocks(source.lines)
-    for start, end, identifier, units in found:
-        shown_units = units if units is not None else "unknown"
-        print(f"managed lines {start + 1}-{end}: id={identifier} units={shown_units}")
-
-    legacy_count = 0
+    count = 0
     index = 0
     while index < len(source.lines):
-        if START_RE.match(source.lines[index]):
-            index += 1
-            while index < len(source.lines) and not END_RE.match(source.lines[index]):
-                index += 1
-            index += 1
-            continue
         legacy = legacy_block_at(source.lines, index)
         if legacy:
             end, backslashes = legacy
             units = backslashes // 2 if backslashes % 2 == 0 else "non-paired"
             print(
-                f"legacy  lines {index + 1}-{end}: "
+                f"spacer  lines {index + 1}-{end}: "
                 f"units={units} literal_backslashes={backslashes}"
             )
-            legacy_count += 1
+            count += 1
             index = end
         else:
             index += 1
-    print(f"summary: managed={len(found)} legacy={legacy_count}")
+    print(f"summary: spacers={count}")
     return 0
 
 
 def command_clean(args: argparse.Namespace) -> int:
     source = read_text_file(args.file)
-    updated, managed_count, legacy_count = remove_blocks(source.lines, args.include_legacy)
+    updated, removed = remove_legacy_blocks(source.lines)
     if updated != source.lines:
         write_text_file(source, updated)
-    print(f"removed managed={managed_count} legacy={legacy_count}; changed={updated != source.lines}")
+    print(f"removed spacers={removed}; changed={updated != source.lines}")
     return 0
 
 
@@ -239,13 +218,10 @@ def command_merge_adjacent(args: argparse.Namespace) -> int:
 
 
 def immutable_content_lines(lines: list[str]) -> list[str]:
-    """Return all user content while excluding only formatter metadata/spacers."""
+    """Return all user content while excluding only spacer blocks."""
     output: list[str] = []
     index = 0
     while index < len(lines):
-        if START_RE.match(lines[index]) or END_RE.match(lines[index]):
-            index += 1
-            continue
         legacy = legacy_block_at(lines, index)
         if legacy:
             index, _ = legacy
@@ -281,15 +257,8 @@ def resolve_anchor(lines: list[str], before_line: int | None, before_text: str |
     return matches[0]
 
 
-def quote_blank(prefix: str) -> str:
-    return prefix.rstrip() if prefix else ""
-
-
 def command_insert(args: argparse.Namespace) -> int:
     source = read_text_file(args.file)
-    existing = managed_blocks(source.lines)
-    if any(identifier == args.id for _, _, identifier, _ in existing):
-        raise ValueError(f"Managed spacer id already exists: {args.id}")
     anchor = resolve_anchor(source.lines, args.before_line, args.before_text)
     target = source.lines[anchor] if anchor < len(source.lines) else ""
     if args.outside_blockquote:
@@ -301,101 +270,31 @@ def command_insert(args: argparse.Namespace) -> int:
         prefix = match.group(1) if match else ""
 
     body = r"\\" * args.lines
-    latex = [
+    block = [
         f"{prefix}$$",
         f"{prefix}\\begin{{align}}",
         f"{prefix}{body}",
         f"{prefix}\\end{{align}}",
         f"{prefix}$$",
     ]
-    block = latex if args.no_markers else [
-        f'{prefix}%% {START_TOKEN} id="{args.id}" lines="{args.lines}" %%',
-        *latex,
-        f"{prefix}%% {END_TOKEN} %%",
-    ]
 
     updated = source.lines[:anchor] + block + source.lines[anchor:]
-    groups_changed = 0
-    if args.no_markers:
-        updated, groups_changed, _ = merge_adjacent_legacy_blocks(updated)
+    updated, groups_changed, _ = merge_adjacent_legacy_blocks(updated)
     write_text_file(source, updated)
     print(
-        f"inserted id={args.id} units={args.lines} before line {anchor + 1}; "
+        f"inserted units={args.lines} before line {anchor + 1}; "
         f"adjacent_groups_merged={groups_changed}"
     )
     return 0
 
 
-def command_set(args: argparse.Namespace) -> int:
-    source = read_text_file(args.file)
-    matches = [block for block in managed_blocks(source.lines) if block[2] == args.id]
-    if len(matches) != 1:
-        raise ValueError(f"Managed spacer id must exist exactly once; found {len(matches)}")
-    start, end, _, _ = matches[0]
-    updated = list(source.lines)
-    start_prefix = re.match(r"^(\s*(?:>\s*)*)", updated[start]).group(1)
-    end_prefix = re.match(r"^(\s*(?:>\s*)*)", updated[end - 1]).group(1)
-    updated[start] = (
-        f'{start_prefix}%% {START_TOKEN} id="{args.id}" lines="{args.lines}" %%'
-    )
-    updated[end - 1] = f"{end_prefix}%% {END_TOKEN} %%"
-    body_index = None
-    for index in range(start + 1, end - 1):
-        stripped = strip_quote(updated[index])
-        if re.fullmatch(r"\\+", stripped):
-            body_index = index
-            break
-    if body_index is None:
-        raise ValueError(f"Managed spacer body was not found for id: {args.id}")
-    prefix_match = re.match(r"^(\s*(?:>\s*)*)", updated[body_index])
-    prefix = prefix_match.group(1) if prefix_match else ""
-    updated[body_index] = prefix + (r"\\" * args.lines)
-    write_text_file(source, updated)
-    print(f"updated id={args.id} units={args.lines}")
-    return 0
-
-
 def command_set_legacy_before(args: argparse.Namespace) -> int:
-    """Resize the annotation-free legacy spacer immediately before a target."""
+    """Resize the annotation-free spacer group immediately before a target."""
     source = read_text_file(args.file)
     anchor = resolve_anchor(source.lines, args.before_line, args.before_text)
-    candidates: list[tuple[int, int, int]] = []
-    index = 0
-    while index < anchor:
-        legacy = legacy_block_at(source.lines, index)
-        if not legacy:
-            index += 1
-            continue
-        end, _ = legacy
-        between = source.lines[end:anchor]
-        if all(not line.strip() for line in between):
-            candidates.append((index, end, legacy[1]))
-        index = end
-    if not candidates:
-        raise ValueError("No annotation-free legacy spacer was found immediately before target")
-
-    group = [candidates[-1]]
-    group_start = candidates[-1][0]
-    group_prefix = quote_prefix(source.lines[group_start + 2])
-    while True:
-        prior = None
-        scan = 0
-        while scan < group_start:
-            legacy = legacy_block_at(source.lines, scan)
-            if not legacy:
-                scan += 1
-                continue
-            end, backslashes = legacy
-            if (
-                quote_prefix(source.lines[scan + 2]) == group_prefix
-                and all(not line.strip() for line in source.lines[end:group_start])
-            ):
-                prior = (scan, end, backslashes)
-            scan = end
-        if prior is None:
-            break
-        group.insert(0, prior)
-        group_start = prior[0]
+    group = legacy_group_before(source.lines, anchor)
+    if not group:
+        raise ValueError("No annotation-free spacer was found immediately before target")
 
     start = group[0][0]
     end = group[-1][1]
@@ -408,7 +307,7 @@ def command_set_legacy_before(args: argparse.Namespace) -> int:
     updated[start:end] = replacement
     write_text_file(source, updated)
     print(
-        f"updated legacy spacer previous_units={previous_units:g} "
+        f"updated spacer previous_units={previous_units:g} "
         f"previous_chunks={len(group)} units={args.lines} before line {anchor + 1}"
     )
     return 0
@@ -418,35 +317,9 @@ def command_remove_legacy_before(args: argparse.Namespace) -> int:
     """Remove only the adjacent annotation-free spacer group before a target."""
     source = read_text_file(args.file)
     anchor = resolve_anchor(source.lines, args.before_line, args.before_text)
-    blocks: list[tuple[int, int, int]] = []
-    index = 0
-    while index < anchor:
-        legacy = legacy_block_at(source.lines, index)
-        if not legacy:
-            index += 1
-            continue
-        end, backslashes = legacy
-        blocks.append((index, end, backslashes))
-        index = end
-
-    if not blocks:
-        raise ValueError("No annotation-free legacy spacer was found before target")
-
-    group = [blocks[-1]]
-    group_start = blocks[-1][0]
-    group_prefix = quote_prefix(source.lines[group_start + 2])
-    if not all(not line.strip() for line in source.lines[blocks[-1][1] : anchor]):
-        raise ValueError("No annotation-free legacy spacer was found immediately before target")
-
-    for prior in reversed(blocks[:-1]):
-        if (
-            quote_prefix(source.lines[prior[0] + 2]) == group_prefix
-            and all(not line.strip() for line in source.lines[prior[1] : group_start])
-        ):
-            group.insert(0, prior)
-            group_start = prior[0]
-        else:
-            break
+    group = legacy_group_before(source.lines, anchor)
+    if not group:
+        raise ValueError("No annotation-free spacer was found immediately before target")
 
     start = group[0][0]
     end = group[-1][1]
@@ -454,21 +327,9 @@ def command_remove_legacy_before(args: argparse.Namespace) -> int:
     updated = source.lines[:start] + source.lines[end:]
     write_text_file(source, updated)
     print(
-        f"removed legacy spacer previous_units={previous_units:g} "
+        f"removed spacer previous_units={previous_units:g} "
         f"previous_chunks={len(group)} before line {anchor + 1}"
     )
-    return 0
-
-
-def command_finalize(args: argparse.Namespace) -> int:
-    """Remove managed marker lines while preserving their LaTeX spacer blocks."""
-    source = read_text_file(args.file)
-    blocks = managed_blocks(source.lines)
-    marker_lines = {index for start, end, _, _ in blocks for index in (start, end - 1)}
-    updated = [line for index, line in enumerate(source.lines) if index not in marker_lines]
-    if updated != source.lines:
-        write_text_file(source, updated)
-    print(f"removed marker pairs={len(blocks)}; changed={updated != source.lines}")
     return 0
 
 
@@ -481,19 +342,21 @@ def path_arg(value: str) -> Path:
     return path
 
 
-def safe_id(value: str) -> str:
-    if not SAFE_ID_RE.fullmatch(value):
-        raise argparse.ArgumentTypeError(
-            "ID must use lowercase letters, digits, dot, underscore, or hyphen"
-        )
-    return value
+def positive_int(value: str) -> int:
+    try:
+        number = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("must be an integer") from error
+    if number < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return number
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    list_parser = subparsers.add_parser("list", help="list managed and legacy spacer blocks")
+    list_parser = subparsers.add_parser("list", help="list annotation-free spacer blocks")
     list_parser.add_argument("file", type=path_arg)
     list_parser.set_defaults(handler=command_list)
 
@@ -503,11 +366,10 @@ def build_parser() -> argparse.ArgumentParser:
     hash_parser.add_argument("file", type=path_arg)
     hash_parser.set_defaults(handler=command_content_hash)
 
-    clean_parser = subparsers.add_parser("clean", help="remove managed spacer blocks")
-    clean_parser.add_argument("file", type=path_arg)
-    clean_parser.add_argument(
-        "--include-legacy", action="store_true", help="also remove whitespace-only align blocks"
+    clean_parser = subparsers.add_parser(
+        "clean", help="remove annotation-free spacer blocks"
     )
+    clean_parser.add_argument("file", type=path_arg)
     clean_parser.set_defaults(handler=command_clean)
 
     merge_parser = subparsers.add_parser(
@@ -517,17 +379,13 @@ def build_parser() -> argparse.ArgumentParser:
     merge_parser.add_argument("file", type=path_arg)
     merge_parser.set_defaults(handler=command_merge_adjacent)
 
-    insert_parser = subparsers.add_parser("insert", help="insert a managed spacer")
+    insert_parser = subparsers.add_parser("insert", help="insert a spacer")
     insert_parser.add_argument("file", type=path_arg)
     anchor = insert_parser.add_mutually_exclusive_group(required=True)
     anchor.add_argument("--before-line", type=int)
     anchor.add_argument("--before-text")
     insert_parser.add_argument(
-        "--lines", type=int, required=True, choices=range(1, 101), metavar="1..100"
-    )
-    insert_parser.add_argument("--id", type=safe_id, required=True)
-    insert_parser.add_argument(
-        "--no-markers", action="store_true", help="write an annotation-free legacy spacer"
+        "--lines", type=positive_int, required=True, metavar="N"
     )
     quote_handling = insert_parser.add_mutually_exclusive_group()
     quote_handling.add_argument(
@@ -540,39 +398,27 @@ def build_parser() -> argparse.ArgumentParser:
     )
     insert_parser.set_defaults(handler=command_insert)
 
-    set_parser = subparsers.add_parser("set", help="change the size of one managed spacer")
-    set_parser.add_argument("file", type=path_arg)
-    set_parser.add_argument("--lines", type=int, required=True, choices=range(1, 101), metavar="1..100")
-    set_parser.add_argument("--id", type=safe_id, required=True)
-    set_parser.set_defaults(handler=command_set)
-
     legacy_set_parser = subparsers.add_parser(
-        "set-legacy-before", help="resize the annotation-free legacy spacer before a target"
+        "set-legacy-before", help="resize the annotation-free spacer before a target"
     )
     legacy_set_parser.add_argument("file", type=path_arg)
     legacy_anchor = legacy_set_parser.add_mutually_exclusive_group(required=True)
     legacy_anchor.add_argument("--before-line", type=int)
     legacy_anchor.add_argument("--before-text")
     legacy_set_parser.add_argument(
-        "--lines", type=int, required=True, choices=range(1, 101), metavar="1..100"
+        "--lines", type=positive_int, required=True, metavar="N"
     )
     legacy_set_parser.set_defaults(handler=command_set_legacy_before)
 
     legacy_remove_parser = subparsers.add_parser(
         "remove-legacy-before",
-        help="remove the annotation-free legacy spacer immediately before a target",
+        help="remove the annotation-free spacer immediately before a target",
     )
     legacy_remove_parser.add_argument("file", type=path_arg)
     legacy_remove_anchor = legacy_remove_parser.add_mutually_exclusive_group(required=True)
     legacy_remove_anchor.add_argument("--before-line", type=int)
     legacy_remove_anchor.add_argument("--before-text")
     legacy_remove_parser.set_defaults(handler=command_remove_legacy_before)
-
-    finalize_parser = subparsers.add_parser(
-        "finalize", help="remove managed marker comments but keep LaTeX spacers"
-    )
-    finalize_parser.add_argument("file", type=path_arg)
-    finalize_parser.set_defaults(handler=command_finalize)
     return parser
 
 

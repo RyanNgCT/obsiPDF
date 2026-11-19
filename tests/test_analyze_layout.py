@@ -117,6 +117,10 @@ class MediaParsingTests(unittest.TestCase):
         lines = "#### Diagram\n![diagram](diagram.png)\n\nNext paragraph".splitlines()
         self.assertEqual(analyze_layout.media_led_block(lines, 1), (1, 2))
 
+    def test_media_led_block_ends_bullet_list_at_blank_line(self) -> None:
+        lines = "#### Diagram\n![diagram](diagram.png)\n- First\n\n- Second".splitlines()
+        self.assertEqual(analyze_layout.media_led_block(lines, 1), (1, 3))
+
 
 class CalloutAnchorTests(unittest.TestCase):
     def test_short_header_is_resolved_before_body_on_next_page(self) -> None:
@@ -162,6 +166,32 @@ class OvercompensationTests(unittest.TestCase):
                 analyze_layout.Location(2, 66.0, 842.0), pages
             )
         )
+
+
+class SpacerAndCommentTests(unittest.TestCase):
+    def test_quoted_spacer_is_recognized_and_skipped(self) -> None:
+        lines = [
+            "> $$",
+            r"> \begin{align}",
+            "> \\\\",
+            r"> \end{align}",
+            "> $$",
+            "> body",
+        ]
+        self.assertEqual(analyze_layout.legacy_spacer_end(lines, 0), 5)
+        self.assertEqual(analyze_layout.skip_layout_only(lines, 0), 5)
+
+    def test_obsidian_and_html_comments_do_not_create_tokens(self) -> None:
+        for line in ("%% hidden %%", "> %% hidden %%", "<!-- hidden -->", "> <!-- hidden -->"):
+            self.assertEqual(analyze_layout.line_tokens(line), [])
+
+    def test_comment_and_spacer_are_both_layout_only(self) -> None:
+        lines = ["%% hidden %%", "", "$$", r"\begin{align}", "\\\\", r"\end{align}", "$$", "Body"]
+        self.assertEqual(analyze_layout.skip_layout_only(lines, 0), 7)
+
+    def test_line_height_is_derived_from_rendered_tops(self) -> None:
+        page = analyze_layout.PageData(["a", "b", "c"], [70.0, 82.0, 94.0], 842.0, 70.0)
+        self.assertAlmostEqual(analyze_layout.estimated_line_height(page), 12.0)
 
 
 if __name__ == "__main__":

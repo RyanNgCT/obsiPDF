@@ -10,14 +10,13 @@ import re
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from statistics import median
 
 import pdfplumber
 
 
 HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
 CALLOUT_RE = re.compile(r"^\s*>\s*\[!([^\]]+)\][+-]?\s*(.*?)\s*$")
-MANAGED_START = "obsidian-pdf-formatter:start"
-MANAGED_END = "obsidian-pdf-formatter:end"
 TOKEN_RE = re.compile(r"[^\W_]+", re.UNICODE)
 MARKDOWN_IMAGE_RE = re.compile(r"!\[[^\]]*\]\(([^)]+)\)|!\[\[([^\]|]+)(?:\|[^\]]+)?\]\]")
 RASTER_SUFFIXES = {".avif", ".bmp", ".gif", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
@@ -25,7 +24,29 @@ LOW_HEADING_LEVELS = {2, 3, 4, 5}
 LOW_HEADING_REVIEW_FRACTION = 0.85
 LOW_HEADING_HARD_FRACTION = 0.90
 MIN_REVIEW_BAND_LINES = 2
+FALLBACK_LINE_HEIGHT = 24.0
 LIST_ITEM_RE = re.compile(r"^(?P<indent>[ \t]*)(?:[-+*]|\d+[.)])\s+")
+LIST_ANY_RE = re.compile(r"^\s{0,3}(?:[-+*]|\d+[.)])\s+")
+ORDERED_ITEM_RE = re.compile(r"^\s{0,3}\d+[.)]\s+")
+NESTED_LIST_RE = re.compile(r"^\s+(?:[-+*]|\d+[.)])\s+")
+BLOCKQUOTE_RE = re.compile(r"^\s*>")
+BACKSLASH_RE = re.compile(r"\\+")
+
+QUOTE_PREFIX_RE = re.compile(r"^\s*(?:>\s*)+")
+LIST_PREFIX_RE = re.compile(r"^\s{0,3}(?:[-+*]|\d+[.)])\s+")
+HEADING_PREFIX_RE = re.compile(r"^#{1,6}\s+")
+CALLOUT_PREFIX_RE = re.compile(r"^\[![^\]]+\][+-]?\s*")
+INLINE_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\([^)]*\)")
+WIKI_IMAGE_RE = re.compile(r"!\[\[([^\]|]+)(?:\|[^\]]+)?\]\]")
+LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]*\)")
+WIKI_PIPE_RE = re.compile(r"\[\[([^\]|]+)\|([^\]]+)\]\]")
+WIKI_LINK_RE = re.compile(r"\[\[([^\]]+)\]\]")
+HTML_TAG_RE = re.compile(r"<[^>]+>")
+BACKTICKS_RE = re.compile(r"`+")
+EMPHASIS_RE = re.compile(r"[*_=~]")
+MATH_TEXT_RE = re.compile(r"\\(?:text|mathrm|mathbf|mathit|operatorname)\{([^{}]*)\}")
+LATEX_COMMAND_RE = re.compile(r"\\[A-Za-z]+")
+MATH_CHARS_RE = re.compile(r"[$^{}]")
 
 
 @dataclass
@@ -77,32 +98,45 @@ def tokens(text: str) -> list[str]:
     return [token.casefold() for token in TOKEN_RE.findall(text)]
 
 
+def strip_quote(line: str) -> str:
+    return QUOTE_PREFIX_RE.sub("", line).strip()
+
+
+def is_comment_line(content: str) -> bool:
+    return (
+        content.startswith("<!--")
+        or content.endswith("-->")
+        or content.startswith("%%")
+        or content.endswith("%%")
+    )
+
+
 def visible_text(line: str) -> str:
-    line = re.sub(r"^\s*(?:>\s*)+", "", line)
-    line = re.sub(r"^\s{0,3}(?:[-+*]|\d+[.)])\s+", "", line)
-    line = re.sub(r"^#{1,6}\s+", "", line)
-    line = re.sub(r"^\[![^\]]+\][+-]?\s*", "", line)
-    line = re.sub(r"!\[([^\]]*)\]\([^)]*\)", r"\1", line)
-    line = re.sub(r"!\[\[([^\]|]+)(?:\|[^\]]+)?\]\]", r"\1", line)
-    line = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", line)
-    line = re.sub(r"\[\[([^\]|]+)\|([^\]]+)\]\]", r"\2", line)
-    line = re.sub(r"\[\[([^\]]+)\]\]", r"\1", line)
-    line = re.sub(r"<[^>]+>", " ", line)
-    line = re.sub(r"`+", "", line)
-    line = re.sub(r"[*_=~]", "", line)
-    line = re.sub(r"\\(?:text|mathrm|mathbf|mathit|operatorname)\{([^{}]*)\}", r"\1", line)
-    line = re.sub(r"\\[A-Za-z]+", " ", line)
-    line = re.sub(r"[$^{}]", " ", line)
+    line = QUOTE_PREFIX_RE.sub("", line)
+    line = LIST_PREFIX_RE.sub("", line)
+    line = HEADING_PREFIX_RE.sub("", line)
+    line = CALLOUT_PREFIX_RE.sub("", line)
+    line = INLINE_IMAGE_RE.sub(r"\1", line)
+    line = WIKI_IMAGE_RE.sub(r"\1", line)
+    line = LINK_RE.sub(r"\1", line)
+    line = WIKI_PIPE_RE.sub(r"\2", line)
+    line = WIKI_LINK_RE.sub(r"\1", line)
+    line = HTML_TAG_RE.sub(" ", line)
+    line = BACKTICKS_RE.sub("", line)
+    line = EMPHASIS_RE.sub("", line)
+    line = MATH_TEXT_RE.sub(r"\1", line)
+    line = LATEX_COMMAND_RE.sub(" ", line)
+    line = MATH_CHARS_RE.sub(" ", line)
     return html.unescape(line)
 
 
 def line_tokens(line: str) -> list[str]:
-    stripped = line.strip()
-    if not stripped or stripped.startswith("```") or stripped.startswith("~~~"):
+    content = strip_quote(line)
+    if not content or content.startswith("```") or content.startswith("~~~"):
         return []
-    if stripped in {"$$", r"\begin{align}", r"\end{align}"}:
+    if content in {"$$", r"\begin{align}", r"\end{align}"}:
         return []
-    if stripped.startswith("<!--") or stripped.endswith("-->"):
+    if is_comment_line(content):
         return []
     return tokens(visible_text(line))
 
@@ -112,9 +146,12 @@ def anchor_windows(block_tokens: list[str], from_end: bool) -> list[list[str]]:
         return []
     maximum = min(10, len(block_tokens))
     windows: list[list[str]] = []
+    seen: set[tuple[str, ...]] = set()
     for size in range(maximum, 0, -1):
         window = block_tokens[-size:] if from_end else block_tokens[:size]
-        if window not in windows:
+        key = tuple(window)
+        if key not in seen:
+            seen.add(key)
             windows.append(window)
     return windows
 
@@ -193,7 +230,7 @@ def collect_callouts(lines: list[str]) -> list[Callout]:
         start = index
         callout_type, title = match.groups()
         index += 1
-        while index < len(lines) and re.match(r"^\s*>", lines[index]):
+        while index < len(lines) and BLOCKQUOTE_RE.match(lines[index]):
             index += 1
         end = index
         label = title or callout_type
@@ -204,11 +241,11 @@ def collect_callouts(lines: list[str]) -> list[Callout]:
 def legacy_spacer_end(lines: list[str], index: int) -> int | None:
     if index + 4 >= len(lines):
         return None
-    if lines[index].strip() != "$$" or lines[index + 1].strip() != r"\begin{align}":
+    if strip_quote(lines[index]) != "$$" or strip_quote(lines[index + 1]) != r"\begin{align}":
         return None
-    if not re.fullmatch(r"\\+", lines[index + 2].strip()):
+    if not BACKSLASH_RE.fullmatch(strip_quote(lines[index + 2])):
         return None
-    if lines[index + 3].strip() != r"\end{align}" or lines[index + 4].strip() != "$$":
+    if strip_quote(lines[index + 3]) != r"\end{align}" or strip_quote(lines[index + 4]) != "$$":
         return None
     return index + 5
 
@@ -218,15 +255,12 @@ def skip_layout_only(lines: list[str], index: int) -> int:
         if not lines[index].strip():
             index += 1
             continue
+        if is_comment_line(strip_quote(lines[index])):
+            index += 1
+            continue
         spacer_end = legacy_spacer_end(lines, index)
         if spacer_end is not None:
             index = spacer_end
-            continue
-        if MANAGED_START in lines[index]:
-            index += 1
-            while index < len(lines) and MANAGED_END not in lines[index]:
-                index += 1
-            index += index < len(lines)
             continue
         break
     return index
@@ -238,7 +272,7 @@ def is_plain_lead_in(line: str) -> bool:
         return False
     if stripped.startswith((">", "```", "~~~", "$$", "|", "![", "![[")):
         return False
-    return re.match(r"^\s{0,3}(?:[-+*]|\d+[.)])\s+", line) is None
+    return LIST_ANY_RE.match(line) is None
 
 
 def heading_associated_callout(
@@ -283,7 +317,7 @@ def media_led_block(lines: list[str], start: int) -> tuple[int, int] | None:
     index = media_index + 1
     while index < len(lines) and not lines[index].strip():
         index += 1
-    if index >= len(lines) or not re.match(r"^\s{0,3}(?:[-+*]|\d+[.)])\s+", lines[index]):
+    if index >= len(lines) or not LIST_ANY_RE.match(lines[index]):
         return media_index, media_index + 1
     end = index + 1
     while end < len(lines):
@@ -292,7 +326,7 @@ def media_led_block(lines: list[str], start: int) -> tuple[int, int] | None:
             probe = end + 1
             while probe < len(lines) and not lines[probe].strip():
                 probe += 1
-            if probe < len(lines) and re.match(r"^\s{0,3}\d+[.)]\s+", lines[probe]):
+            if probe < len(lines) and ORDERED_ITEM_RE.match(lines[probe]):
                 end = probe + 1
                 continue
             break
@@ -300,7 +334,7 @@ def media_led_block(lines: list[str], start: int) -> tuple[int, int] | None:
             break
         if markdown_image_target(lines[end]) is not None or stripped.startswith(("|", "```", "~~~", "$$")):
             break
-        if re.match(r"^\s+(?:[-+*]|\d+[.)])\s+", lines[end]):
+        if NESTED_LIST_RE.match(lines[end]):
             end += 1
             continue
         break
@@ -393,6 +427,17 @@ def position(location: Location) -> tuple[int, float]:
     return location.page, location.top
 
 
+def estimated_line_height(page: PageData) -> float:
+    """Estimate one rendered text line from distinct tops on the page.
+
+    Falls back to a conservative constant when the page has fewer than two
+    distinct text positions (for example, a heading alone on the page).
+    """
+    tops = sorted({round(top, 1) for top in page.tops})
+    deltas = [later - earlier for earlier, later in zip(tops, tops[1:]) if later - earlier > 1.0]
+    return median(deltas) if deltas else FALLBACK_LINE_HEIGHT
+
+
 def page_top_overcompensated(location: Location, pages: list[PageData]) -> bool:
     """Detect a moved target stranded materially below the normal top margin."""
     page = pages[location.page - 1]
@@ -400,25 +445,15 @@ def page_top_overcompensated(location: Location, pages: list[PageData]) -> bool:
     if page.firstTop is None or not observed:
         return False
     normal_top = min(observed)
-    one_rendered_line = 24.0
+    one_rendered_line = estimated_line_height(page) * 1.5
     is_first_visible_item = abs(location.top - page.firstTop) <= 2.0
     return is_first_visible_item and location.top > normal_top + one_rendered_line
 
 
 def first_substantive_tokens(lines: list[str], start: int) -> tuple[int, list[str]] | None:
     index = start
-    managed = False
     while index < len(lines):
         line = lines[index]
-        if MANAGED_START in line:
-            managed = True
-            index += 1
-            continue
-        if managed:
-            if MANAGED_END in line:
-                managed = False
-            index += 1
-            continue
         heading = HEADING_RE.match(line)
         if heading:
             index += 1
@@ -458,8 +493,11 @@ def analyze(note: Path, pdf: Path) -> dict[str, object]:
                 )
             )
             for image in sorted(page.images, key=lambda item: float(item.get("top", 0.0))):
+                top = image.get("top")
+                if top is None:
+                    continue
                 pdf_image_locations.append(
-                    Location(page_index + 1, float(image.get("top", 0.0)), float(page.height))
+                    Location(page_index + 1, float(top), float(page.height))
                 )
 
     violations: list[Violation] = []
