@@ -14,6 +14,16 @@ sys.modules[SPEC.name] = analyze_layout
 SPEC.loader.exec_module(analyze_layout)
 
 
+def spacer(prefix: str = "", units: int = 1) -> list[str]:
+    return [
+        f"{prefix}$$",
+        f"{prefix}\\begin{{align}}",
+        f"{prefix}{'\\\\' * units}",
+        f"{prefix}\\end{{align}}",
+        f"{prefix}$$",
+    ]
+
+
 class HeadingThresholdTests(unittest.TestCase):
     def test_h2_through_h5_accept_review_band_with_meaningful_content(self) -> None:
         for level in range(2, 6):
@@ -46,6 +56,47 @@ class HeadingThresholdTests(unittest.TestCase):
         inferred = analyze_layout.nearest_location_before(candidates, boundary)
         self.assertIsNotNone(inferred)
         self.assertEqual((inferred.page, inferred.top), (1, 795.0))
+
+    def test_repeated_text_on_one_page_is_not_treated_as_unique(self) -> None:
+        pages = [
+            analyze_layout.PageData(
+                ["repeat", "repeat", "x"], [10.0, 90.0, 200.0], 842.0
+            )
+        ]
+        self.assertEqual(analyze_layout.locate(pages, [["repeat"]]), [])
+        self.assertEqual(
+            len(analyze_layout.locate_all(pages, [["repeat"]])), 2
+        )
+
+    def test_longer_unique_window_still_resolves(self) -> None:
+        pages = [
+            analyze_layout.PageData(
+                ["repeat", "x", "repeat", "y"], [10.0, 20.0, 30.0, 40.0], 842.0
+            )
+        ]
+        found = analyze_layout.locate(
+            pages, analyze_layout.anchor_windows(["repeat", "x"], False)
+        )
+        self.assertEqual((found[0].page, found[0].top), (1, 10.0))
+
+    def test_single_walk_returns_both_locate_results(self) -> None:
+        repeated = [
+            analyze_layout.PageData(
+                ["repeat", "repeat", "x"], [10.0, 90.0, 200.0], 842.0
+            )
+        ]
+        unique_page = [
+            analyze_layout.PageData(
+                ["repeat", "x", "repeat", "y"], [10.0, 20.0, 30.0, 40.0], 842.0
+            )
+        ]
+        for pages, candidates in (
+            (repeated, [["repeat"]]),
+            (unique_page, analyze_layout.anchor_windows(["repeat", "x"], False)),
+        ):
+            unique, all_matches = analyze_layout.locate_with_all(pages, candidates)
+            self.assertEqual(unique, analyze_layout.locate(pages, candidates))
+            self.assertEqual(all_matches, analyze_layout.locate_all(pages, candidates))
 
 
 class HeadingCalloutGroupingTests(unittest.TestCase):
@@ -117,6 +168,18 @@ class MediaParsingTests(unittest.TestCase):
         lines = "#### Diagram\n![diagram](diagram.png)\n\nNext paragraph".splitlines()
         self.assertEqual(analyze_layout.media_led_block(lines, 1), (1, 2))
 
+    def test_media_led_block_ends_bullet_list_at_blank_line(self) -> None:
+        lines = "#### Diagram\n![diagram](diagram.png)\n- First\n\n- Second".splitlines()
+        self.assertEqual(analyze_layout.media_led_block(lines, 1), (1, 3))
+
+    def test_media_led_block_includes_tight_bullet_list(self) -> None:
+        lines = "#### Diagram\n![diagram](diagram.png)\n- First\n- Second".splitlines()
+        self.assertEqual(analyze_layout.media_led_block(lines, 1), (1, 4))
+
+    def test_media_led_block_includes_tight_numbered_list(self) -> None:
+        lines = "#### Diagram\n![diagram](diagram.png)\n1. First\n2. Second".splitlines()
+        self.assertEqual(analyze_layout.media_led_block(lines, 1), (1, 4))
+
 
 class CalloutAnchorTests(unittest.TestCase):
     def test_short_header_is_resolved_before_body_on_next_page(self) -> None:
@@ -134,6 +197,19 @@ class OvercompensationTests(unittest.TestCase):
         pages = [
             analyze_layout.PageData(["normal"], [55.0], 842.0, 55.0),
             analyze_layout.PageData(["dimension"], [230.0], 842.0, 230.0),
+        ]
+        self.assertTrue(
+            analyze_layout.page_top_overcompensated(
+                analyze_layout.Location(2, 230.0, 842.0), pages
+            )
+        )
+
+    def test_sparse_page_does_not_inflate_overcompensation_threshold(self) -> None:
+        pages = [
+            analyze_layout.PageData(["normal"], [55.0], 842.0, 55.0),
+            analyze_layout.PageData(
+                ["heading", "caption"], [230.0, 750.0], 842.0, 230.0
+            ),
         ]
         self.assertTrue(
             analyze_layout.page_top_overcompensated(
@@ -162,6 +238,59 @@ class OvercompensationTests(unittest.TestCase):
                 analyze_layout.Location(2, 66.0, 842.0), pages
             )
         )
+
+
+class SpacerAndCommentTests(unittest.TestCase):
+    def test_quoted_spacer_is_recognized_and_skipped(self) -> None:
+        lines = [
+            "> $$",
+            r"> \begin{align}",
+            "> \\\\",
+            r"> \end{align}",
+            "> $$",
+            "> body",
+        ]
+        self.assertEqual(analyze_layout.legacy_spacer_end(lines, 0), 5)
+        self.assertEqual(analyze_layout.skip_layout_only(lines, 0), 5)
+
+    def test_obsidian_and_html_comments_do_not_create_tokens(self) -> None:
+        for line in ("%% hidden %%", "> %% hidden %%", "<!-- hidden -->", "> <!-- hidden -->"):
+            self.assertEqual(analyze_layout.line_tokens(line), [])
+
+    def test_comment_and_spacer_are_both_layout_only(self) -> None:
+        lines = ["%% hidden %%", "", "$$", r"\begin{align}", "\\\\", r"\end{align}", "$$", "Body"]
+        self.assertEqual(analyze_layout.skip_layout_only(lines, 0), 7)
+
+    def test_spacer_indentation_respects_code_blocks(self) -> None:
+        indented = [
+            "    $$",
+            r"    \begin{align}",
+            r"    \\",
+            r"    \end{align}",
+            "    $$",
+            "Body",
+        ]
+        self.assertIsNone(analyze_layout.legacy_spacer_end(indented, 0))
+        self.assertEqual(analyze_layout.skip_layout_only(indented, 0), 0)
+
+        two_space = [
+            "  $$",
+            r"  \begin{align}",
+            r"  \\",
+            r"  \end{align}",
+            "  $$",
+            "Body",
+        ]
+        self.assertEqual(analyze_layout.legacy_spacer_end(two_space, 0), 5)
+
+    def test_fenced_spacer_is_not_layout_only(self) -> None:
+        lines = ["```latex", *spacer(), "```", "", "Body"]
+        self.assertIsNone(analyze_layout.legacy_spacer_end(lines, 1))
+        self.assertEqual(analyze_layout.skip_layout_only(lines, 0), 0)
+
+    def test_line_height_is_derived_from_rendered_tops(self) -> None:
+        page = analyze_layout.PageData(["a", "b", "c"], [70.0, 82.0, 94.0], 842.0, 70.0)
+        self.assertAlmostEqual(analyze_layout.estimated_line_height(page), 12.0)
 
 
 if __name__ == "__main__":

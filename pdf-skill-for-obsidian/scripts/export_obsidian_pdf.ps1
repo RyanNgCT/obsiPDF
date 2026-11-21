@@ -30,6 +30,67 @@ function Wait-Until {
     throw $FailureMessage
 }
 
+function Test-PdfReadable {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    try {
+        $stream = [IO.File]::Open(
+            $Path,
+            [IO.FileMode]::Open,
+            [IO.FileAccess]::Read,
+            [IO.FileShare]::Read)
+        try {
+            if ($stream.Length -lt 10) { return $false }
+            $header = New-Object byte[] 5
+            if ($stream.Read($header, 0, 5) -ne 5) { return $false }
+            if ([Text.Encoding]::ASCII.GetString($header) -ne '%PDF-') { return $false }
+            $tailLength = [Math]::Min(2048, [int]$stream.Length)
+            $stream.Seek(-$tailLength, [IO.SeekOrigin]::End) | Out-Null
+            $tail = New-Object byte[] $tailLength
+            $read = $stream.Read($tail, 0, $tailLength)
+            $tailText = [Text.Encoding]::ASCII.GetString($tail, 0, $read)
+            return ($tailText.TrimEnd() -match '%%EOF$')
+        } finally {
+            $stream.Dispose()
+        }
+    } catch {
+        return $false
+    }
+}
+
+function Wait-ForPdf {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][DateTime]$After,
+        [int]$Timeout = $TimeoutSeconds,
+        [int]$StableMilliseconds = 750
+    )
+    $deadline = [DateTime]::UtcNow.AddSeconds($Timeout)
+    $lastLength = -1
+    $lastWrite = [DateTime]::MinValue
+    $stableSince = $null
+    do {
+        if (Test-Path -LiteralPath $Path -PathType Leaf) {
+            $file = Get-Item -LiteralPath $Path
+            if ($file.Length -gt 0 -and $file.LastWriteTimeUtc -gt $After) {
+                if ($file.Length -eq $lastLength -and $file.LastWriteTimeUtc -eq $lastWrite) {
+                    if ($null -eq $stableSince) {
+                        $stableSince = [DateTime]::UtcNow
+                    } elseif ((([DateTime]::UtcNow - $stableSince).TotalMilliseconds -ge $StableMilliseconds) -and
+                        (Test-PdfReadable -Path $Path)) {
+                        return $file
+                    }
+                } else {
+                    $lastLength = $file.Length
+                    $lastWrite = $file.LastWriteTimeUtc
+                    $stableSince = $null
+                }
+            }
+        }
+        Start-Sleep -Milliseconds 250
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw "Obsidian did not finish writing a stable, readable PDF: $Path"
+}
+
 function Get-RootWindows {
     $root = [System.Windows.Automation.AutomationElement]::RootElement
     return $root.FindAll(
@@ -38,25 +99,13 @@ function Get-RootWindows {
     )
 }
 
-function Get-Descendants {
-    param([System.Windows.Automation.AutomationElement]$Element)
-    return $Element.FindAll(
-        [System.Windows.Automation.TreeScope]::Descendants,
-        [System.Windows.Automation.Condition]::TrueCondition
-    )
-}
-
-function Find-Descendant {
+function Find-One {
     param(
-        [System.Windows.Automation.AutomationElement]$Element,
-        [scriptblock]$Predicate
+        [Parameter(Mandatory = $true)][System.Windows.Automation.AutomationElement]$Element,
+        [Parameter(Mandatory = $true)][System.Windows.Automation.Condition]$Condition
     )
-    $items = @(Get-Descendants -Element $Element)
-    for ($index = 0; $index -lt $items.Count; $index++) {
-        $candidate = $items[$index]
-        if (& $Predicate $candidate) { return $candidate }
-    }
-    return $null
+    return $Element.FindFirst(
+        [System.Windows.Automation.TreeScope]::Descendants, $Condition)
 }
 
 function Find-OverwriteConfirmation {
@@ -106,19 +155,21 @@ function Find-OverwriteConfirmation {
 
 function Find-ExportMenuItem {
     param([System.Windows.Automation.AutomationElement]$Element)
+    $condition = [System.Windows.Automation.AndCondition]::new(
+        [System.Windows.Automation.PropertyCondition]::new(
+            [System.Windows.Automation.AutomationElement]::NameProperty, 'Export to PDF...'),
+        [System.Windows.Automation.PropertyCondition]::new(
+            [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+            [System.Windows.Automation.ControlType]::Text)
+    )
+    $candidate = Find-One -Element $Element -Condition $condition
+    if (-not $candidate) { return $null }
+
     $walker = [System.Windows.Automation.TreeWalker]::RawViewWalker
-    $items = @(Get-Descendants -Element $Element)
-    for ($index = 0; $index -lt $items.Count; $index++) {
-        $candidate = $items[$index]
-        if ($candidate.Current.Name -ne 'Export to PDF...' -or
-            $candidate.Current.ControlType -ne [System.Windows.Automation.ControlType]::Text) {
-            continue
-        }
-        $ancestor = $candidate
-        for ($depth = 0; $depth -lt 8 -and $ancestor; $depth++) {
-            if ($ancestor.Current.ClassName -match '(^|\s)menu-item(\s|$)') { return $ancestor }
-            $ancestor = $walker.GetParent($ancestor)
-        }
+    $ancestor = $candidate
+    for ($depth = 0; $depth -lt 8 -and $ancestor; $depth++) {
+        if ($ancestor.Current.ClassName -match '(^|\s)menu-item(\s|$)') { return $ancestor }
+        $ancestor = $walker.GetParent($ancestor)
     }
     return $null
 }
@@ -171,19 +222,26 @@ $handle = [IntPtr]$obsidianWindow.Current.NativeWindowHandle
 
 $exportMenuItem = Find-ExportMenuItem -Element $obsidianWindow
 if (-not $exportMenuItem) {
-    $stalePrompt = Find-Descendant -Element $obsidianWindow -Predicate {
-        param($element)
-        $element.Current.ClassName -eq 'prompt' -or $element.Current.Name -eq 'Select a command...'
-    }
+    $promptCondition = [System.Windows.Automation.OrCondition]::new(
+        [System.Windows.Automation.PropertyCondition]::new(
+            [System.Windows.Automation.AutomationElement]::ClassNameProperty, 'prompt'),
+        [System.Windows.Automation.PropertyCondition]::new(
+            [System.Windows.Automation.AutomationElement]::NameProperty, 'Select a command...')
+    )
+    $stalePrompt = Find-One -Element $obsidianWindow -Condition $promptCondition
     if ($stalePrompt) {
         [System.Windows.Forms.SendKeys]::SendWait('{ESC}')
         Start-Sleep -Milliseconds 250
     }
-    $moreOptionsButton = Find-Descendant -Element $obsidianWindow -Predicate {
-        param($element)
-        $element.Current.Name -eq 'More options' -and
-            $element.Current.ControlType -eq [System.Windows.Automation.ControlType]::Button
-    }
+
+    $moreOptionsCondition = [System.Windows.Automation.AndCondition]::new(
+        [System.Windows.Automation.PropertyCondition]::new(
+            [System.Windows.Automation.AutomationElement]::NameProperty, 'More options'),
+        [System.Windows.Automation.PropertyCondition]::new(
+            [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+            [System.Windows.Automation.ControlType]::Button)
+    )
+    $moreOptionsButton = Find-One -Element $obsidianWindow -Condition $moreOptionsCondition
     if ($moreOptionsButton) {
         $moreOptionsButton.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
         try {
@@ -202,15 +260,20 @@ if ($exportMenuItem) {
     throw 'Obsidian note menu did not expose Export to PDF; rerun the three-dot workflow.'
 }
 
+$exportButtonCondition = [System.Windows.Automation.AndCondition]::new(
+    [System.Windows.Automation.PropertyCondition]::new(
+        [System.Windows.Automation.AutomationElement]::NameProperty, 'Export to PDF'),
+    [System.Windows.Automation.PropertyCondition]::new(
+        [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+        [System.Windows.Automation.ControlType]::Button)
+)
 $exportButton = Wait-Until -FailureMessage 'Obsidian Export to PDF dialog did not open.' -Condition {
-    Find-Descendant -Element $obsidianWindow -Predicate {
-        param($element)
-        $element.Current.Name -eq 'Export to PDF' -and
-            $element.Current.ControlType -eq [System.Windows.Automation.ControlType]::Button
-    }
+    Find-One -Element $obsidianWindow -Condition $exportButtonCondition
 }
 
-$dialogItems = @(Get-Descendants -Element $obsidianWindow)
+$dialogItems = @($obsidianWindow.FindAll(
+    [System.Windows.Automation.TreeScope]::Descendants,
+    [System.Windows.Automation.Condition]::TrueCondition))
 $dropdowns = @()
 $toggles = @()
 $slider = $null
@@ -250,16 +313,25 @@ $saveDialog = Wait-Until -FailureMessage 'Windows Save As dialog did not open.' 
     return $null
 }
 
-$fileNameInput = Find-Descendant -Element $saveDialog -Predicate {
-    param($element)
-    $element.Current.Name -eq 'File name:' -and
-        $element.Current.AutomationId -eq '1001' -and
-        $element.Current.ControlType -eq [System.Windows.Automation.ControlType]::Edit
-}
-$saveButton = Find-Descendant -Element $saveDialog -Predicate {
-    param($element)
-    $element.Current.Name -eq 'Save' -and $element.Current.AutomationId -eq '1'
-}
+$fileNameCondition = [System.Windows.Automation.AndCondition]::new(
+    [System.Windows.Automation.PropertyCondition]::new(
+        [System.Windows.Automation.AutomationElement]::NameProperty, 'File name:'),
+    [System.Windows.Automation.AndCondition]::new(
+        [System.Windows.Automation.PropertyCondition]::new(
+            [System.Windows.Automation.AutomationElement]::AutomationIdProperty, '1001'),
+        [System.Windows.Automation.PropertyCondition]::new(
+            [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+            [System.Windows.Automation.ControlType]::Edit)
+    )
+)
+$saveButtonCondition = [System.Windows.Automation.AndCondition]::new(
+    [System.Windows.Automation.PropertyCondition]::new(
+        [System.Windows.Automation.AutomationElement]::NameProperty, 'Save'),
+    [System.Windows.Automation.PropertyCondition]::new(
+        [System.Windows.Automation.AutomationElement]::AutomationIdProperty, '1')
+)
+$fileNameInput = Find-One -Element $saveDialog -Condition $fileNameCondition
+$saveButton = Find-One -Element $saveDialog -Condition $saveButtonCondition
 if (-not $fileNameInput -or -not $saveButton) { throw 'Save As controls were not found.' }
 
 $fileNameInput.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue($resolvedOutput)
@@ -275,7 +347,7 @@ if (-not [ObsidianPdfWindow]::PostMessage(
 }
 
 if ($Overwrite) {
-    $confirmation = Wait-Until -Timeout 60 -FailureMessage 'No overwrite confirmation was shown.' -Condition {
+    $confirmation = Wait-Until -FailureMessage 'No overwrite confirmation was shown.' -Condition {
         if (-not (Test-Path -LiteralPath $resolvedOutput) -or
             (Get-Item -LiteralPath $resolvedOutput).LastWriteTimeUtc -le $beforeWrite) {
             return Find-OverwriteConfirmation -SaveDialog $saveDialog `
@@ -288,12 +360,7 @@ if ($Overwrite) {
     }
 }
 
-Wait-Until -FailureMessage "Obsidian did not finish writing the PDF: $resolvedOutput" -Condition {
-    if (-not (Test-Path -LiteralPath $resolvedOutput)) { return $null }
-    $file = Get-Item -LiteralPath $resolvedOutput
-    if ($file.Length -gt 0 -and $file.LastWriteTimeUtc -gt $beforeWrite) { return $file }
-    return $null
-} | Out-Null
+Wait-ForPdf -Path $resolvedOutput -After $beforeWrite -Timeout $TimeoutSeconds | Out-Null
 
 [ordered]@{
     notePath = $resolvedNote
