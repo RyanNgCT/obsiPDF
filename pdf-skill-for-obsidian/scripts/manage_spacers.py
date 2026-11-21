@@ -61,6 +61,7 @@ def write_text_file(source: TextFile, lines: list[str]) -> None:
     output_endings = [source.newline] * len(lines)
     target_literal = fenced_code_lines(lines)
     content_index = 0
+    mapped = [False] * len(lines)
     index = 0
     while index < len(lines):
         legacy = legacy_block_at(lines, index, target_literal)
@@ -70,14 +71,26 @@ def write_text_file(source: TextFile, lines: list[str]) -> None:
         if content_index < len(content_endings):
             output_endings[index] = content_endings[content_index]
             content_index += 1
+            mapped[index] = True
         index += 1
 
     if lines:
-        if source.final_newline:
-            if not output_endings[-1]:
-                output_endings[-1] = source.newline
-        else:
-            output_endings[-1] = ""
+        last_content = next(
+            (index for index in range(len(lines) - 1, -1, -1) if mapped[index]),
+            None,
+        )
+        # The original last content line may no longer be last when a spacer
+        # follows it; restore the separator it originally had before the spacer.
+        if (
+            last_content is not None
+            and last_content != len(lines) - 1
+            and not output_endings[last_content]
+        ):
+            output_endings[last_content] = source.newline
+        # Only formatter-owned spacer lines take the file-level final-newline
+        # setting; mapped content lines keep their original ending.
+        if not mapped[-1]:
+            output_endings[-1] = source.newline if source.final_newline else ""
     text = "".join(line + ending for line, ending in zip(lines, output_endings))
     data = text.encode("utf-8")
     if source.bom:
@@ -101,30 +114,43 @@ def strip_quote(line: str) -> str:
     return re.sub(r"^\s*(?:>\s*)+", "", line).strip()
 
 
+def next_fence_state(
+    line: str, open_fence: tuple[str, int] | None
+) -> tuple[str, int] | None:
+    """Return the fence open after `line`, or None when the line closes it."""
+    content = QUOTE_RE.sub("", line)
+    match = FENCE_RE.match(content)
+    if open_fence is None:
+        if not match:
+            return None
+        return match.group(1)[0], len(match.group(1))
+    if (
+        match
+        and match.group(1)[0] == open_fence[0]
+        and len(match.group(1)) >= open_fence[1]
+        and not match.group(2).strip()
+    ):
+        return None
+    return open_fence
+
+
 def fenced_code_lines(lines: list[str]) -> list[bool]:
-    """Mark lines inside fenced code so literal examples are never edited."""
+    """Mark lines inside fenced code so fenced examples are never edited."""
     mask = [False] * len(lines)
-    fence_char: str | None = None
-    fence_length = 0
+    open_fence: tuple[str, int] | None = None
     for index, line in enumerate(lines):
-        content = QUOTE_RE.sub("", line)
-        match = FENCE_RE.match(content)
-        if fence_char is None:
-            if match:
-                fence_char = match.group(1)[0]
-                fence_length = len(match.group(1))
-                mask[index] = True
-        else:
-            mask[index] = True
-            if (
-                match
-                and match.group(1)[0] == fence_char
-                and len(match.group(1)) >= fence_length
-                and not match.group(2).strip()
-            ):
-                fence_char = None
-                fence_length = 0
+        was_open = open_fence is not None
+        open_fence = next_fence_state(line, open_fence)
+        mask[index] = was_open or open_fence is not None
     return mask
+
+
+def fence_is_open_before(lines: list[str], index: int) -> bool:
+    """Return whether the boundary before `index` is inside a fenced block."""
+    open_fence: tuple[str, int] | None = None
+    for line in lines[:index]:
+        open_fence = next_fence_state(line, open_fence)
+    return open_fence is not None
 
 
 def legacy_block_at(
@@ -298,24 +324,6 @@ def command_merge_adjacent(args: argparse.Namespace) -> int:
     return 0
 
 
-def immutable_content_lines(
-    lines: list[str], literal: list[bool] | None = None
-) -> list[str]:
-    """Return all user content while excluding only spacer blocks."""
-    if literal is None:
-        literal = fenced_code_lines(lines)
-    output: list[str] = []
-    index = 0
-    while index < len(lines):
-        legacy = legacy_block_at(lines, index, literal)
-        if legacy:
-            index, _ = legacy
-            continue
-        output.append(lines[index])
-        index += 1
-    return output
-
-
 def immutable_content_text(
     source: TextFile, literal: list[bool] | None = None
 ) -> str:
@@ -379,6 +387,8 @@ def resolve_anchor(lines: list[str], before_line: int | None, before_text: str |
 def command_insert(args: argparse.Namespace) -> int:
     source = read_text_file(args.file)
     anchor = resolve_anchor(source.lines, args.before_line, args.before_text)
+    if fence_is_open_before(source.lines, anchor):
+        raise ValueError("Refusing to insert a spacer inside a fenced code block")
     target = source.lines[anchor] if anchor < len(source.lines) else ""
     if args.outside_blockquote:
         prefix = ""

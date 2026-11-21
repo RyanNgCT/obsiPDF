@@ -25,6 +25,7 @@ LOW_HEADING_REVIEW_FRACTION = 0.85
 LOW_HEADING_HARD_FRACTION = 0.90
 MIN_REVIEW_BAND_LINES = 2
 FALLBACK_LINE_HEIGHT = 24.0
+MAX_LINE_HEIGHT = 48.0
 LIST_ITEM_RE = re.compile(r"^(?P<indent>[ \t]*)(?:[-+*]|\d+[.)])\s+")
 LIST_ANY_RE = re.compile(r"^\s{0,3}(?:[-+*]|\d+[.)])\s+")
 ORDERED_ITEM_RE = re.compile(r"^\s{0,3}\d+[.)]\s+")
@@ -502,11 +503,19 @@ def estimated_line_height(page: PageData) -> float:
     """Estimate one rendered text line from distinct tops on the page.
 
     Falls back to a conservative constant when the page has fewer than two
-    distinct text positions (for example, a heading alone on the page).
+    distinct text positions (for example, a heading alone on the page). The
+    estimate is capped so a page with only a few widely separated lines cannot
+    inflate the one-line threshold used by the overcompensation check.
     """
     tops = sorted({round(top, 1) for top in page.tops})
-    deltas = [later - earlier for earlier, later in zip(tops, tops[1:]) if later - earlier > 1.0]
-    return median(deltas) if deltas else FALLBACK_LINE_HEIGHT
+    deltas = [
+        later - earlier
+        for earlier, later in zip(tops, tops[1:])
+        if later - earlier > 1.0
+    ]
+    if not deltas:
+        return FALLBACK_LINE_HEIGHT
+    return min(median(deltas), MAX_LINE_HEIGHT)
 
 
 def page_top_overcompensated(

@@ -128,22 +128,73 @@ class LegacySpacerTests(unittest.TestCase):
                 ("", "\n"),
                 ("", "\r\n"),
                 ("", "\r\n"),
-                *((line, "\n") for line in spacer(1)),
+                *((line, "\n") for line in spacer(units=1)),
                 ("", "\r\n"),
-                *((line, "\n") for line in spacer(2)),
+                *((line, "\n") for line in spacer(units=2)),
                 ("", "\r\n"),
             ]
             path.write_bytes(
                 "".join(line + ending for line, ending in parts).encode("utf-8")
             )
-            before = manage_spacers.immutable_content_text(
-                manage_spacers.read_text_file(path)
-            )
+            source = manage_spacers.read_text_file(path)
+            before = manage_spacers.immutable_content_text(source)
+            _, removed = manage_spacers.remove_legacy_blocks(source.lines)
+            self.assertEqual(removed, 2)
             manage_spacers.command_clean(argparse.Namespace(file=path))
             after = manage_spacers.immutable_content_text(
                 manage_spacers.read_text_file(path)
             )
             self.assertEqual(before, after)
+
+    def test_clean_keeps_trailing_blank_without_final_newline(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "note.md"
+            path.write_bytes(("Body\n\n" + "\n".join(spacer())).encode("utf-8"))
+            source = manage_spacers.read_text_file(path)
+            before = manage_spacers.immutable_content_text(source)
+            manage_spacers.command_clean(argparse.Namespace(file=path))
+            after = manage_spacers.immutable_content_text(
+                manage_spacers.read_text_file(path)
+            )
+            self.assertEqual(path.read_bytes(), b"Body\n\n")
+            self.assertEqual(after, before)
+
+    def test_insert_at_eof_keeps_separator_without_final_newline(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "note.md"
+            path.write_bytes(b"# H\nBody")
+            manage_spacers.command_insert(
+                argparse.Namespace(
+                    file=path,
+                    before_line=3,
+                    before_text=None,
+                    lines=1,
+                    outside_blockquote=False,
+                    quote_prefix=None,
+                )
+            )
+            self.assertEqual(
+                path.read_bytes(),
+                b"# H\nBody\n$$\n\\begin{align}\n\\\\\n\\end{align}\n$$",
+            )
+
+    def test_insert_refuses_fenced_anchor(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "note.md"
+            original = b"```\n## Example\n```\n"
+            path.write_bytes(original)
+            with self.assertRaises(ValueError):
+                manage_spacers.command_insert(
+                    argparse.Namespace(
+                        file=path,
+                        before_line=None,
+                        before_text="## Example",
+                        lines=1,
+                        outside_blockquote=False,
+                        quote_prefix=None,
+                    )
+                )
+            self.assertEqual(path.read_bytes(), original)
 
 
 if __name__ == "__main__":

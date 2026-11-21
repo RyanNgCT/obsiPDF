@@ -204,6 +204,19 @@ class OvercompensationTests(unittest.TestCase):
             )
         )
 
+    def test_sparse_page_does_not_inflate_overcompensation_threshold(self) -> None:
+        pages = [
+            analyze_layout.PageData(["normal"], [55.0], 842.0, 55.0),
+            analyze_layout.PageData(
+                ["heading", "caption"], [230.0, 750.0], 842.0, 230.0
+            ),
+        ]
+        self.assertTrue(
+            analyze_layout.page_top_overcompensated(
+                analyze_layout.Location(2, 230.0, 842.0), pages
+            )
+        )
+
     def test_target_at_normal_top_is_accepted(self) -> None:
         pages = [
             analyze_layout.PageData(["normal"], [55.0], 842.0, 55.0),

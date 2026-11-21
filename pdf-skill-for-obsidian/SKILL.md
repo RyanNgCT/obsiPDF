@@ -67,4 +67,4 @@ powershell -File scripts/export_obsidian_pdf.ps1 -NotePath "Note.md" -OutputPath
 powershell -File scripts/export_obsidian_pdf.ps1 -NotePath "Note.md" -OutputPath "Note.pdf"
 ```
 
-`--lines N` writes `N` LaTeX `\\` units (one unit per command). Always use `--outside-blockquote` for callout headers. `--before-text` matches any line containing the text, so use `--before-line` when the anchor is ambiguous (for example `##### Example` also matches `##### Example case`), and point `--before-line` at the first line after an existing spacer, never inside it.
+`--lines N` writes `N` LaTeX `\\` units (one unit per command). Always use `--outside-blockquote` for callout headers. `--before-text` matches any line containing the text, so use `--before-line` when the anchor is ambiguous (for example `##### Example` also matches `##### Example case`), and point `--before-line` at the first line after an existing spacer, never inside it. `insert` refuses an anchor inside a fenced code block.
