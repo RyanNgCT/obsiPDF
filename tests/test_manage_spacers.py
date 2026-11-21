@@ -178,6 +178,33 @@ class LegacySpacerTests(unittest.TestCase):
                 b"# H\nBody\n$$\n\\begin{align}\n\\\\\n\\end{align}\n$$",
             )
 
+    def test_spacer_indentation_respects_code_blocks(self) -> None:
+        indented = [
+            "# H",
+            "",
+            "    $$",
+            r"    \begin{align}",
+            r"    \\",
+            r"    \end{align}",
+            "    $$",
+            "Body",
+        ]
+        self.assertIsNone(manage_spacers.legacy_block_at(indented, 2))
+        updated, removed = manage_spacers.remove_legacy_blocks(indented)
+        self.assertEqual((removed, updated), (0, indented))
+
+        two_space = [
+            "A",
+            "",
+            "  $$",
+            r"  \begin{align}",
+            r"  \\",
+            r"  \end{align}",
+            "  $$",
+            "B",
+        ]
+        self.assertEqual(manage_spacers.legacy_block_at(two_space, 2), (7, 2))
+
     def test_insert_refuses_fenced_anchor(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "note.md"

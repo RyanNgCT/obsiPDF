@@ -14,6 +14,7 @@ from pathlib import Path
 
 
 QUOTE_RE = re.compile(r"^(\s*(?:>\s*)+)")
+QUOTE_MARKER_RE = re.compile(r"^(?:[ \t]*>[ \t]?)+")
 BACKSLASH_RE = re.compile(r"\\+")
 FENCE_RE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})(.*)$")
 
@@ -114,6 +115,14 @@ def strip_quote(line: str) -> str:
     return re.sub(r"^\s*(?:>\s*)+", "", line).strip()
 
 
+def indented_code_line(line: str) -> bool:
+    """Return whether a line starts at Markdown's indented-code depth."""
+    if line.startswith("\t") or line.startswith("    "):
+        return True
+    content = QUOTE_MARKER_RE.sub("", line, count=1)
+    return content.startswith("\t") or content.startswith("    ")
+
+
 def next_fence_state(
     line: str, open_fence: tuple[str, int] | None
 ) -> tuple[str, int] | None:
@@ -160,6 +169,8 @@ def legacy_block_at(
     if literal is None:
         literal = fenced_code_lines(lines)
     if index + 4 >= len(lines) or any(literal[index : index + 5]):
+        return None
+    if all(indented_code_line(lines[index + offset]) for offset in range(5)):
         return None
     if strip_quote(lines[index]) != "$$":
         return None

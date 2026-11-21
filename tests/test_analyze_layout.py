@@ -261,6 +261,28 @@ class SpacerAndCommentTests(unittest.TestCase):
         lines = ["%% hidden %%", "", "$$", r"\begin{align}", "\\\\", r"\end{align}", "$$", "Body"]
         self.assertEqual(analyze_layout.skip_layout_only(lines, 0), 7)
 
+    def test_spacer_indentation_respects_code_blocks(self) -> None:
+        indented = [
+            "    $$",
+            r"    \begin{align}",
+            r"    \\",
+            r"    \end{align}",
+            "    $$",
+            "Body",
+        ]
+        self.assertIsNone(analyze_layout.legacy_spacer_end(indented, 0))
+        self.assertEqual(analyze_layout.skip_layout_only(indented, 0), 0)
+
+        two_space = [
+            "  $$",
+            r"  \begin{align}",
+            r"  \\",
+            r"  \end{align}",
+            "  $$",
+            "Body",
+        ]
+        self.assertEqual(analyze_layout.legacy_spacer_end(two_space, 0), 5)
+
     def test_fenced_spacer_is_not_layout_only(self) -> None:
         lines = ["```latex", *spacer(), "```", "", "Body"]
         self.assertIsNone(analyze_layout.legacy_spacer_end(lines, 1))

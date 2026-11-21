@@ -35,6 +35,7 @@ BACKSLASH_RE = re.compile(r"\\+")
 FENCE_RE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})(.*)$")
 
 QUOTE_PREFIX_RE = re.compile(r"^\s*(?:>\s*)+")
+QUOTE_MARKER_RE = re.compile(r"^(?:[ \t]*>[ \t]?)+")
 LIST_PREFIX_RE = re.compile(r"^\s{0,3}(?:[-+*]|\d+[.)])\s+")
 HEADING_PREFIX_RE = re.compile(r"^#{1,6}\s+")
 CALLOUT_PREFIX_RE = re.compile(r"^\[![^\]]+\][+-]?\s*")
@@ -103,6 +104,14 @@ def tokens(text: str) -> list[str]:
 
 def strip_quote(line: str) -> str:
     return QUOTE_PREFIX_RE.sub("", line).strip()
+
+
+def indented_code_line(line: str) -> bool:
+    """Return whether a line starts at Markdown's indented-code depth."""
+    if line.startswith("\t") or line.startswith("    "):
+        return True
+    content = QUOTE_MARKER_RE.sub("", line, count=1)
+    return content.startswith("\t") or content.startswith("    ")
 
 
 def fenced_code_lines(lines: list[str]) -> list[bool]:
@@ -292,6 +301,8 @@ def legacy_spacer_end(
     if literal is None:
         literal = fenced_code_lines(lines)
     if index + 4 >= len(lines) or any(literal[index : index + 5]):
+        return None
+    if all(indented_code_line(lines[index + offset]) for offset in range(5)):
         return None
     if strip_quote(lines[index]) != "$$" or strip_quote(lines[index + 1]) != r"\begin{align}":
         return None
