@@ -79,6 +79,25 @@ class HeadingThresholdTests(unittest.TestCase):
         )
         self.assertEqual((found[0].page, found[0].top), (1, 10.0))
 
+    def test_single_walk_returns_both_locate_results(self) -> None:
+        repeated = [
+            analyze_layout.PageData(
+                ["repeat", "repeat", "x"], [10.0, 90.0, 200.0], 842.0
+            )
+        ]
+        unique_page = [
+            analyze_layout.PageData(
+                ["repeat", "x", "repeat", "y"], [10.0, 20.0, 30.0, 40.0], 842.0
+            )
+        ]
+        for pages, candidates in (
+            (repeated, [["repeat"]]),
+            (unique_page, analyze_layout.anchor_windows(["repeat", "x"], False)),
+        ):
+            unique, all_matches = analyze_layout.locate_with_all(pages, candidates)
+            self.assertEqual(unique, analyze_layout.locate(pages, candidates))
+            self.assertEqual(all_matches, analyze_layout.locate_all(pages, candidates))
+
 
 class HeadingCalloutGroupingTests(unittest.TestCase):
     def associated(self, markdown: str):

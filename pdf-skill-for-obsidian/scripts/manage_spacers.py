@@ -230,7 +230,8 @@ def legacy_group_before(
 
     Blocks may be separated only by blank lines and must share the same
     indentation/block-quote prefix. This mirrors the page-break grouping used
-    by merge-adjacent and keeps both resize and removal linear in the file.
+    by merge-adjacent and keeps both resize and removal linear in the file and
+    in the number of blocks in the group.
     """
     group: list[tuple[int, int, int]] = []
     literal = fenced_code_lines(lines)
@@ -246,8 +247,9 @@ def legacy_group_before(
             prefix = block_prefix
         elif block_prefix != prefix:
             break
-        group.insert(0, (start, cursor, legacy[1]))
+        group.append((start, cursor, legacy[1]))
         cursor = previous_nonblank(lines, start)
+    group.reverse()
     return group
 
 
@@ -276,20 +278,22 @@ def command_list(args: argparse.Namespace) -> int:
 def command_clean(args: argparse.Namespace) -> int:
     source = read_text_file(args.file)
     updated, removed = remove_legacy_blocks(source.lines)
-    if updated != source.lines:
+    changed = updated != source.lines
+    if changed:
         write_text_file(source, updated)
-    print(f"removed spacers={removed}; changed={updated != source.lines}")
+    print(f"removed spacers={removed}; changed={changed}")
     return 0
 
 
 def command_merge_adjacent(args: argparse.Namespace) -> int:
     source = read_text_file(args.file)
     updated, groups_changed, blocks_removed = merge_adjacent_legacy_blocks(source.lines)
-    if updated != source.lines:
+    changed = updated != source.lines
+    if changed:
         write_text_file(source, updated)
     print(
         f"merged groups={groups_changed} removed_blocks={blocks_removed}; "
-        f"changed={updated != source.lines}"
+        f"changed={changed}"
     )
     return 0
 

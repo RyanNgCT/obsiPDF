@@ -78,6 +78,7 @@ class PageData:
     tops: list[float]
     height: float
     firstTop: float | None = None
+    positions: dict[str, list[int]] | None = None
 
 
 @dataclass
@@ -183,31 +184,56 @@ def anchor_windows(block_tokens: list[str], from_end: bool) -> list[list[str]]:
     return windows
 
 
-def sequence_starts(haystack: list[str], needle: list[str]) -> list[int]:
-    if len(needle) > len(haystack):
-        return []
-    return [
-        index
-        for index, value in enumerate(haystack)
-        if value == needle[0] and haystack[index : index + len(needle)] == needle
-    ]
+def page_positions(page: PageData) -> dict[str, list[int]]:
+    """Cache each token's offsets so anchors are verified only at real hits."""
+    if page.positions is None:
+        page.positions = {}
+        for offset, token in enumerate(page.tokens):
+            page.positions.setdefault(token, []).append(offset)
+    return page.positions
+
+
+def match_candidate(pages: list[PageData], candidate: list[str]) -> list[Location]:
+    """Return every occurrence, checking only positions of the first token."""
+    matches: list[Location] = []
+    size = len(candidate)
+    for page_index, page in enumerate(pages):
+        for offset in page_positions(page).get(candidate[0], ()):
+            if page.tokens[offset : offset + size] == candidate:
+                matches.append(Location(page_index + 1, page.tops[offset], page.height))
+    return matches
 
 
 def locate(pages: list[PageData], candidates: list[list[str]]) -> list[Location]:
     for candidate in candidates:
-        matches = locate_all(pages, [candidate])
+        matches = match_candidate(pages, candidate)
         if len(matches) == 1:
             return matches
     return []
 
 
+def locate_with_all(
+    pages: list[PageData], candidates: list[list[str]]
+) -> tuple[list[Location], list[Location]]:
+    """Return the unique match, plus the first non-empty match set.
+
+    The second value matches ``locate_all`` for the same candidates, so callers
+    that need both results can walk the candidates once instead of twice.
+    """
+    first_nonempty: list[Location] = []
+    for candidate in candidates:
+        matches = match_candidate(pages, candidate)
+        if matches and not first_nonempty:
+            first_nonempty = matches
+        if len(matches) == 1:
+            return matches, first_nonempty
+    return [], first_nonempty
+
+
 def locate_all(pages: list[PageData], candidates: list[list[str]]) -> list[Location]:
     """Return every occurrence for the longest candidate that has a match."""
     for candidate in candidates:
-        matches: list[Location] = []
-        for page_index, page in enumerate(pages):
-            for start in sequence_starts(page.tokens, candidate):
-                matches.append(Location(page_index + 1, page.tops[start], page.height))
+        matches = match_candidate(pages, candidate)
         if matches:
             return matches
     return []
@@ -231,12 +257,12 @@ def resolve_short_anchor(
     choosing the closest one before the block's end or next source anchor.
     """
     candidates = anchor_windows(anchor_tokens, False)
-    unique = locate(pages, candidates)
+    unique, all_matches = locate_with_all(pages, candidates)
     if unique:
         return unique
     if boundary is None:
         return []
-    nearest = nearest_location_before(locate_all(pages, candidates), boundary)
+    nearest = nearest_location_before(all_matches, boundary)
     return [nearest] if nearest else []
 
 
@@ -275,8 +301,11 @@ def legacy_spacer_end(
     return index + 5
 
 
-def skip_layout_only(lines: list[str], index: int) -> int:
-    literal = fenced_code_lines(lines)
+def skip_layout_only(
+    lines: list[str], index: int, literal: list[bool] | None = None
+) -> int:
+    if literal is None:
+        literal = fenced_code_lines(lines)
     while index < len(lines):
         if not lines[index].strip():
             index += 1
@@ -302,7 +331,10 @@ def is_plain_lead_in(line: str) -> bool:
 
 
 def heading_associated_callout(
-    lines: list[str], heading_index: int, callouts_by_start: dict[int, Callout]
+    lines: list[str],
+    heading_index: int,
+    callouts_by_start: dict[int, Callout],
+    literal: list[bool] | None = None,
 ) -> Callout | None:
     """Return the first callout governed by a heading.
 
@@ -310,7 +342,7 @@ def heading_associated_callout(
     introductory paragraph. Lists, media, tables, code, math, another heading,
     or more than one paragraph end the association.
     """
-    index = skip_layout_only(lines, heading_index + 1)
+    index = skip_layout_only(lines, heading_index + 1, literal)
     if index in callouts_by_start:
         return callouts_by_start[index]
     if index >= len(lines) or not is_plain_lead_in(lines[index]):
@@ -319,7 +351,7 @@ def heading_associated_callout(
         if not is_plain_lead_in(lines[index]):
             return None
         index += 1
-    index = skip_layout_only(lines, index)
+    index = skip_layout_only(lines, index, literal)
     return callouts_by_start.get(index)
 
 
@@ -330,7 +362,9 @@ def markdown_image_target(line: str) -> str | None:
     return (match.group(1) or match.group(2)).split("#", 1)[0].split("?", 1)[0]
 
 
-def media_led_block(lines: list[str], start: int) -> tuple[int, int] | None:
+def media_led_block(
+    lines: list[str], start: int, literal: list[bool] | None = None
+) -> tuple[int, int] | None:
     """Return a media-first block and any immediately accompanying list.
 
     The returned pair is ``(media line, end-exclusive line)``. Tightly spaced
@@ -338,7 +372,7 @@ def media_led_block(lines: list[str], start: int) -> tuple[int, int] | None:
     list, but a blank line ends a bulleted list's association. A heading,
     callout, paragraph, table, code block, or second media item ends the block.
     """
-    media_index = skip_layout_only(lines, start)
+    media_index = skip_layout_only(lines, start, literal)
     if media_index >= len(lines) or markdown_image_target(lines[media_index]) is None:
         return None
     index = media_index + 1
@@ -374,13 +408,15 @@ def media_led_block(lines: list[str], start: int) -> tuple[int, int] | None:
     return media_index, end
 
 
-def first_nested_list_group(lines: list[str], heading_index: int) -> tuple[int, int] | None:
+def first_nested_list_group(
+    lines: list[str], heading_index: int, literal: list[bool] | None = None
+) -> tuple[int, int] | None:
     """Find a heading's first list item when that item has nested list content.
 
     Permit one short lead-in paragraph. Return the first item's source span,
     ending before its next sibling, so later list items may flow normally.
     """
-    index = skip_layout_only(lines, heading_index + 1)
+    index = skip_layout_only(lines, heading_index + 1, literal)
     if index < len(lines) and is_plain_lead_in(lines[index]):
         lead_lines: list[str] = []
         while index < len(lines) and lines[index].strip():
@@ -392,7 +428,7 @@ def first_nested_list_group(lines: list[str], heading_index: int) -> tuple[int, 
             index += 1
         if len(lead_lines) > 2 or sum(len(line_tokens(line)) for line in lead_lines) > 30:
             return None
-        index = skip_layout_only(lines, index)
+        index = skip_layout_only(lines, index, literal)
     if index >= len(lines):
         return None
     first = LIST_ITEM_RE.match(lines[index])
@@ -446,8 +482,10 @@ def rendered_lines_after(location: Location, pages: list[PageData]) -> int:
     return len({round(top, 1) for top in page.tops if top > location.top + 2.0})
 
 
-def next_anchor_tokens(lines: list[str], start: int) -> list[str] | None:
-    index = skip_layout_only(lines, start)
+def next_anchor_tokens(
+    lines: list[str], start: int, literal: list[bool] | None = None
+) -> list[str] | None:
+    index = skip_layout_only(lines, start, literal)
     while index < len(lines):
         found = line_tokens(lines[index])
         if found:
@@ -471,14 +509,24 @@ def estimated_line_height(page: PageData) -> float:
     return median(deltas) if deltas else FALLBACK_LINE_HEIGHT
 
 
-def page_top_overcompensated(location: Location, pages: list[PageData]) -> bool:
+def page_top_overcompensated(
+    location: Location,
+    pages: list[PageData],
+    normal_top: float | None = None,
+    line_height: float | None = None,
+) -> bool:
     """Detect a moved target stranded materially below the normal top margin."""
     page = pages[location.page - 1]
-    observed = [item.firstTop for item in pages if item.firstTop is not None]
-    if page.firstTop is None or not observed:
+    if page.firstTop is None:
         return False
-    normal_top = min(observed)
-    one_rendered_line = estimated_line_height(page) * 1.5
+    if normal_top is None:
+        observed = [item.firstTop for item in pages if item.firstTop is not None]
+        if not observed:
+            return False
+        normal_top = min(observed)
+    if line_height is None:
+        line_height = estimated_line_height(page)
+    one_rendered_line = line_height * 1.5
     is_first_visible_item = abs(location.top - page.firstTop) <= 2.0
     return is_first_visible_item and location.top > normal_top + one_rendered_line
 
@@ -535,6 +583,10 @@ def analyze(note: Path, pdf: Path) -> dict[str, object]:
 
     violations: list[Violation] = []
     unresolved: list[Unresolved] = []
+    observed_tops = [item.firstTop for item in pages if item.firstTop is not None]
+    normal_top = min(observed_tops) if observed_tops else None
+    line_heights = [estimated_line_height(page) for page in pages]
+    literal = fenced_code_lines(lines)
     callouts = collect_callouts(lines)
     callouts_by_start = {callout.start: callout for callout in callouts}
     callout_end_locations: dict[int, Location] = {}
@@ -550,7 +602,7 @@ def analyze(note: Path, pdf: Path) -> dict[str, object]:
         start_tokens = token_lines[0]
         end_tokens = token_lines[-1]
         end_locations = locate(pages, anchor_windows(end_tokens, True))
-        boundary_tokens = next_anchor_tokens(lines, callout.end)
+        boundary_tokens = next_anchor_tokens(lines, callout.end, literal)
         boundary_locations = (
             locate(pages, anchor_windows(boundary_tokens, False)) if boundary_tokens else []
         )
@@ -607,7 +659,12 @@ def analyze(note: Path, pdf: Path) -> dict[str, object]:
                     end_location.page,
                 )
             )
-        if page_top_overcompensated(start_locations[0], pages):
+        if page_top_overcompensated(
+            start_locations[0],
+            pages,
+            normal_top,
+            line_heights[start_locations[0].page - 1],
+        ):
             violations.append(
                 Violation(
                     "page-top-overcompensation",
@@ -629,17 +686,17 @@ def analyze(note: Path, pdf: Path) -> dict[str, object]:
         level = len(match.group(1))
         label = visible_text(match.group(2)).strip()
         heading_tokens = tokens(label)
-        media_block = media_led_block(lines, index + 1)
+        media_block = media_led_block(lines, index + 1, literal)
         following = first_substantive_tokens(lines, index + 1)
         if not heading_tokens or not following:
             continue
         end_index, following_tokens = following
         content_locations = locate(pages, anchor_windows(following_tokens, False))
         heading_candidates = anchor_windows(heading_tokens, False)
-        heading_locations = locate(pages, heading_candidates)
+        heading_locations, heading_matches = locate_with_all(pages, heading_candidates)
         if not heading_locations and content_locations:
             inferred_heading = nearest_location_before(
-                locate_all(pages, heading_candidates), content_locations[0]
+                heading_matches, content_locations[0]
             )
             if inferred_heading:
                 heading_locations = [inferred_heading]
@@ -648,8 +705,10 @@ def analyze(note: Path, pdf: Path) -> dict[str, object]:
             missing.append("heading")
         if not content_locations and media_block is None:
             missing.append("following content")
-        governed_callout = heading_associated_callout(lines, index, callouts_by_start)
-        nested_list_group = first_nested_list_group(lines, index)
+        governed_callout = heading_associated_callout(
+            lines, index, callouts_by_start, literal
+        )
+        nested_list_group = first_nested_list_group(lines, index, literal)
         governed_end = (
             callout_end_locations.get(governed_callout.start)
             if governed_callout is not None
@@ -693,7 +752,9 @@ def analyze(note: Path, pdf: Path) -> dict[str, object]:
                         round(fraction, 4),
                     )
                 )
-            if page_top_overcompensated(location, pages):
+            if page_top_overcompensated(
+                location, pages, normal_top, line_heights[location.page - 1]
+            ):
                 violations.append(
                     Violation(
                         "page-top-overcompensation",
@@ -755,7 +816,7 @@ def analyze(note: Path, pdf: Path) -> dict[str, object]:
                 if block_token_lines
                 else []
             )
-            next_tokens = next_anchor_tokens(lines, block_end)
+            next_tokens = next_anchor_tokens(lines, block_end, literal)
             next_locations = locate(pages, anchor_windows(next_tokens, False)) if next_tokens else []
             upper = heading_locations[0]
             lower = block_end_locations[0] if block_end_locations else (next_locations[0] if next_locations else None)
